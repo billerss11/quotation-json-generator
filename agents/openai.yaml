@@ -1,0 +1,4 @@
+interface:
+  display_name: "Quotation JSON Generator"
+  short_description: "Build import-ready quotation JSON from source files"
+  default_prompt: "Use $quotation-json-generator to turn this text, image, or PDF into an import-ready quotation JSON file."

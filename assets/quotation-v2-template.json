@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 2,
+  "app": "quotation-software",
+  "exportedAt": "2026-01-01T00:00:00.000Z",
+  "quotation": {
+    "id": "replace-with-unique-id",
+    "templateId": "legacy",
+    "companyProfileId": null,
+    "companyProfileSnapshot": {
+      "companyName": "",
+      "email": "",
+      "phone": ""
+    },
+    "header": {
+      "quotationNumber": "",
+      "revisionNumber": 1,
+      "quotationDate": "2026-01-01",
+      "customerCompany": "",
+      "contactPerson": "",
+      "contactDetails": "",
+      "projectName": "",
+      "validityPeriod": "30 days",
+      "currency": "USD",
+      "documentLocale": "en-US",
+      "notes": "",
+      "terms": ""
+    },
+    "majorItems": [],
+    "lineItemEntryMode": "detailed",
+    "outputSettings": {
+      "itemDetailLevel": 3
+    },
+    "totalsConfig": {
+      "globalMarkupRate": 0,
+      "extraCharges": [],
+      "taxMode": "single",
+      "taxClasses": [
+        {
+          "id": "default-tax-class",
+          "label": "0%",
+          "rate": 0
+        }
+      ],
+      "defaultTaxClassId": "default-tax-class",
+      "mixedTaxColumns": [
+        "taxRate",
+        "unitPrice",
+        "unitPriceWithTax",
+        "netAmount",
+        "grossAmount"
+      ]
+    },
+    "exchangeRates": {
+      "USD": 1
+    },
+    "branding": {
+      "logoDataUrl": "",
+      "accentColor": "#047857"
+    },
+    "metadata": {
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    }
+  }
+}
