@@ -15,6 +15,11 @@ const defaultMixedTaxColumns = ['taxRate', 'unitPrice', 'unitPriceWithTax', 'net
 const maxMarkupRate = 1000
 const maxTaxRate = 100
 const maxExchangeRate = 1_000_000
+const supportedCurrencies = new Set(
+  typeof Intl.supportedValuesOf === 'function'
+    ? Intl.supportedValuesOf('currency')
+    : ['CNY', 'EUR', 'GBP', 'JPY', 'USD'],
+)
 
 export function buildQuotationEnvelope(input, now = new Date()) {
   if (!isRecord(input)) throw new Error('Input must be a JSON object.')
@@ -387,9 +392,9 @@ function dateOnly(value) {
 }
 
 function normalizeCurrency(value) {
-  return typeof value === 'string' && /^[A-Za-z]{3}$/.test(value.trim())
-    ? value.trim().toUpperCase()
-    : null
+  if (typeof value !== 'string' || !/^[A-Za-z]{3}$/.test(value.trim())) return null
+  const currency = value.trim().toUpperCase()
+  return supportedCurrencies.has(currency) ? currency : null
 }
 
 function positiveInteger(value, fallback) { return Number.isInteger(value) && value > 0 ? value : fallback }
@@ -452,6 +457,12 @@ async function runSelfTest(outputPath) {
   if (result.errors.length > 0) throw new Error(result.errors.join('\n'))
   if (envelope.quotation.majorItems[0].children.length !== 3) {
     throw new Error('Nested item generation failed.')
+  }
+  const invalidCurrency = structuredClone(envelope)
+  invalidCurrency.quotation.header.currency = 'ZZZ'
+  invalidCurrency.quotation.exchangeRates = { ZZZ: 1 }
+  if (validateQuotationEnvelope(invalidCurrency).errors.length === 0) {
+    throw new Error('Unsupported currency validation failed.')
   }
   if (outputPath) {
     await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
