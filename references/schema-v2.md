@@ -1,6 +1,6 @@
 # Quotation Software JSON Schema v2
 
-This is the maintained skill reference for the current app contract. The application source of truth is `src/features/quotations/types.ts`, `src/features/quotations/utils/quotationFile.ts`, and `src/features/quotations/utils/quotationCalculations.ts` in the Quotation Software repository.
+This is the maintained skill reference for the current app contract. The application source of truth is `src/features/quotations/types.ts`, `src/features/quotations/utils/quotationFile.ts`, `src/features/quotations/utils/quotationCalculations.ts`, and `src/features/goods-receipts/utils/goodsReceipt.ts` in the Quotation Software repository.
 
 ## Envelope
 
@@ -31,6 +31,8 @@ Required complete output fields:
 - `exchangeRates`: currency-to-base rate table.
 - `branding`: `{ logoDataUrl, accentColor }` strings.
 - `metadata`: `{ createdAt, updatedAt }` ISO timestamps.
+- `pendingGoodsReceiptDraft` (optional): receipt draft loaded by **Generate GR** after import.
+- `goodsReceiptHistory`: completed goods-receipt records stored with the quotation; use an empty array when none exist. Read [goods-receipt.md](goods-receipt.md) before creating or changing either receipt field.
 
 ### Header
 

@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url'
 
 const templates = new Set(['legacy', 'technical-bid', 'executive-summary', 'luminous', 'signal', 'atelier'])
 const locales = new Set(['en-US', 'zh-CN'])
+const goodsReceiptTemplates = new Set(['standard', 'compact'])
+const goodsReceiptSelectionPresets = new Set(['summary', 'grouped', 'detailed'])
 const allowedMixedTaxColumns = new Set([
   'taxRate', 'unitPrice', 'unitTax', 'unitPriceWithTax', 'taxAmount', 'netAmount', 'grossAmount',
 ])
@@ -101,6 +103,16 @@ export function buildQuotationEnvelope(input, now = new Date()) {
       createdAt: canonicalIso(source.metadata?.createdAt) ?? timestamp,
       updatedAt: canonicalIso(source.metadata?.updatedAt) ?? timestamp,
     },
+    goodsReceiptHistory: [],
+  }
+  if (source.pendingGoodsReceiptDraft !== undefined) {
+    quotation.pendingGoodsReceiptDraft = structuredClone(source.pendingGoodsReceiptDraft)
+  }
+  if (source.goodsReceiptHistory !== undefined) {
+    if (!Array.isArray(source.goodsReceiptHistory)) {
+      throw new Error('goodsReceiptHistory must be an array when supplied.')
+    }
+    quotation.goodsReceiptHistory = structuredClone(source.goodsReceiptHistory)
   }
 
   const envelope = { schemaVersion: 2, app: 'quotation-software', exportedAt: timestamp, quotation }
@@ -156,7 +168,393 @@ export function validateQuotationEnvelope(value) {
     || !canonicalIso(quotation.metadata.updatedAt)) {
     errors.push('metadata must contain canonical createdAt and updatedAt ISO timestamps.')
   }
+  if (quotation.pendingGoodsReceiptDraft !== undefined) {
+    validateGoodsReceiptDraftAtPath(
+      quotation.pendingGoodsReceiptDraft,
+      'pendingGoodsReceiptDraft',
+      quotation,
+      errors,
+      warnings,
+    )
+  }
+  validateGoodsReceiptHistory(quotation.goodsReceiptHistory, quotation, errors, warnings)
   return { errors, warnings: [...new Set(warnings)] }
+}
+
+export function setPendingGoodsReceiptDraftInEnvelope(value, input, now = new Date()) {
+  if (!isRecord(value)) throw new Error('Quotation file must be a JSON object.')
+  if (!isRecord(input)) throw new Error('Goods-receipt input must be a JSON object.')
+
+  const envelope = structuredClone(value)
+  const existing = validateQuotationEnvelope(envelope)
+  if (existing.errors.length > 0) {
+    throw new Error(`Cannot set goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
+  }
+
+  const warnings = [...existing.warnings]
+  const timestamp = now.toISOString()
+  const draftSource = isRecord(input.draft) ? input.draft : input
+  envelope.quotation.pendingGoodsReceiptDraft = buildGoodsReceiptDraft(
+    envelope.quotation,
+    draftSource,
+    warnings,
+    timestamp,
+  )
+  envelope.exportedAt = timestamp
+  envelope.quotation.metadata.updatedAt = timestamp
+
+  const result = validateQuotationEnvelope(envelope)
+  if (result.errors.length > 0) {
+    throw new Error(`Cannot set goods-receipt draft:\n- ${result.errors.join('\n- ')}`)
+  }
+
+  return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
+}
+
+export function addGoodsReceiptToEnvelope(value, input, now = new Date()) {
+  if (!isRecord(value)) throw new Error('Quotation file must be a JSON object.')
+  if (!isRecord(input)) throw new Error('Goods-receipt input must be a JSON object.')
+
+  const envelope = structuredClone(value)
+  const existing = validateQuotationEnvelope(envelope)
+  if (existing.errors.length > 0) {
+    throw new Error(`Cannot add goods receipt to an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
+  }
+
+  const warnings = [...existing.warnings]
+  const timestamp = now.toISOString()
+  const draftSource = isRecord(input.draft) ? input.draft : input
+  const draft = buildGoodsReceiptDraft(envelope.quotation, draftSource, warnings, timestamp)
+  const exportedAt = canonicalIso(input.exportedAt) ?? timestamp
+
+  if (input.exportedAt !== undefined && !canonicalIso(input.exportedAt)) {
+    warnings.push('Goods-receipt exportedAt was invalid; used the current timestamp.')
+  }
+
+  const filePath = text(input.filePath)
+  if (!filePath.trim()) {
+    warnings.push('Goods-receipt filePath is empty. The record will not point to an exported PDF.')
+  }
+
+  envelope.quotation.goodsReceiptHistory = [
+    ...(envelope.quotation.goodsReceiptHistory ?? []),
+    {
+      id: nonEmpty(input.id) ? input.id.trim() : randomUUID(),
+      exportedAt,
+      filePath,
+      draft,
+    },
+  ]
+  delete envelope.quotation.pendingGoodsReceiptDraft
+  envelope.exportedAt = timestamp
+  envelope.quotation.metadata.updatedAt = timestamp
+
+  const result = validateQuotationEnvelope(envelope)
+  if (result.errors.length > 0) {
+    throw new Error(`Cannot add goods receipt:\n- ${result.errors.join('\n- ')}`)
+  }
+
+  return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
+}
+
+export function buildGoodsReceiptDraft(quotation, input, warnings = [], timestamp = new Date().toISOString()) {
+  if (!isRecord(quotation)) throw new Error('Quotation must be a JSON object.')
+  if (!isRecord(input)) throw new Error('Goods-receipt draft must be a JSON object.')
+
+  const documentDate = dateOnly(input.documentDate) ?? timestamp.slice(0, 10)
+  if (!dateOnly(input.documentDate)) {
+    warnings.push(`Goods-receipt document date was missing or invalid; used ${documentDate}.`)
+  }
+
+  const templateId = goodsReceiptTemplates.has(input.templateId) ? input.templateId : 'standard'
+  if (input.templateId !== undefined && !goodsReceiptTemplates.has(input.templateId)) {
+    warnings.push('Goods-receipt template was invalid; used standard.')
+  }
+
+  const selectionPreset = goodsReceiptSelectionPresets.has(input.selectionPreset)
+    ? input.selectionPreset
+    : 'detailed'
+  if (input.selectionPreset === undefined) {
+    warnings.push('Goods-receipt line selection was missing; used detailed leaf lines at quoted quantities.')
+  } else if (!goodsReceiptSelectionPresets.has(input.selectionPreset)) {
+    warnings.push('Goods-receipt line selection was invalid; used detailed leaf lines at quoted quantities.')
+  }
+
+  const lines = createGoodsReceiptLineDrafts(quotation.majorItems)
+  applyGoodsReceiptSelectionPreset(lines, selectionPreset)
+  applyGoodsReceiptLineOverrides(lines, input.lines, warnings)
+
+  const supplierContact = [quotation.companyProfileSnapshot?.email, quotation.companyProfileSnapshot?.phone]
+    .map((value) => text(value).trim())
+    .filter(Boolean)
+    .join(' | ')
+
+  return {
+    quotationId: text(quotation.id),
+    quotationNumber: text(quotation.header?.quotationNumber),
+    quotationDate: text(quotation.header?.quotationDate),
+    grNumber: text(input.grNumber) || createGoodsReceiptNumber(documentDate),
+    documentDate,
+    customerReference: text(input.customerReference ?? input.poNumber),
+    deliveryReference: text(input.deliveryReference),
+    receivingCompany: typeof input.receivingCompany === 'string'
+      ? input.receivingCompany
+      : text(quotation.header?.customerCompany),
+    deliveryAddress: text(input.deliveryAddress),
+    deliveryContact: typeof input.deliveryContact === 'string'
+      ? input.deliveryContact
+      : text(quotation.header?.contactPerson),
+    contactDetails: typeof input.contactDetails === 'string'
+      ? input.contactDetails
+      : text(quotation.header?.contactDetails),
+    supplierCompany: typeof input.supplierCompany === 'string'
+      ? input.supplierCompany
+      : text(quotation.companyProfileSnapshot?.companyName),
+    supplierContact: typeof input.supplierContact === 'string' ? input.supplierContact : supplierContact,
+    projectName: typeof input.projectName === 'string'
+      ? input.projectName
+      : text(quotation.header?.projectName),
+    preparedBy: text(input.preparedBy),
+    remarks: text(input.remarks ?? input.notes),
+    templateId,
+    lines,
+  }
+}
+
+export function validateGoodsReceiptDraft(value, quotation) {
+  const errors = []
+  const warnings = []
+  validateGoodsReceiptDraftAtPath(value, 'goodsReceiptDraft', quotation, errors, warnings)
+  return { errors, warnings: [...new Set(warnings)] }
+}
+
+function validateGoodsReceiptHistory(value, quotation, errors, warnings) {
+  if (value === undefined) return
+  if (!Array.isArray(value)) {
+    errors.push('goodsReceiptHistory must be an array when supplied.')
+    return
+  }
+
+  const recordIds = new Set()
+  value.forEach((record, index) => {
+    const path = `goodsReceiptHistory[${index}]`
+    if (!isRecord(record)) {
+      errors.push(`${path} must be an object.`)
+      return
+    }
+    validateUniqueId(record.id, path, recordIds, errors)
+    if (!canonicalIso(record.exportedAt)) errors.push(`${path}.exportedAt must be a canonical UTC ISO timestamp.`)
+    if (typeof record.filePath !== 'string') errors.push(`${path}.filePath must be a string.`)
+    else if (!record.filePath.trim()) warnings.push(`${path}.filePath is empty and does not point to an exported PDF.`)
+    validateGoodsReceiptDraftAtPath(record.draft, `${path}.draft`, quotation, errors, warnings)
+  })
+}
+
+function validateGoodsReceiptDraftAtPath(value, path, quotation, errors, warnings) {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object.`)
+    return
+  }
+
+  for (const key of [
+    'quotationId', 'quotationNumber', 'quotationDate', 'grNumber', 'documentDate',
+    'customerReference', 'deliveryReference', 'receivingCompany', 'deliveryAddress',
+    'deliveryContact', 'contactDetails', 'supplierCompany', 'supplierContact', 'projectName',
+    'preparedBy', 'remarks',
+  ]) {
+    if (typeof value[key] !== 'string') errors.push(`${path}.${key} must be a string.`)
+  }
+  if (!dateOnly(value.quotationDate)) errors.push(`${path}.quotationDate must use YYYY-MM-DD.`)
+  if (!dateOnly(value.documentDate)) errors.push(`${path}.documentDate must use YYYY-MM-DD.`)
+  if (!goodsReceiptTemplates.has(value.templateId)) {
+    errors.push(`${path}.templateId must be standard or compact.`)
+  }
+  if (isRecord(quotation)) {
+    if (value.quotationId !== quotation.id) warnings.push(`${path}.quotationId does not match the current quotation.`)
+    if (value.quotationNumber !== quotation.header?.quotationNumber) {
+      warnings.push(`${path}.quotationNumber does not match the current quotation number.`)
+    }
+  }
+  if (!Array.isArray(value.lines)) {
+    errors.push(`${path}.lines must be an array.`)
+    return
+  }
+
+  const lineIds = new Set()
+  let exportableLineCount = 0
+  for (const [index, line] of value.lines.entries()) {
+    const linePath = `${path}.lines[${index}]`
+    if (!isRecord(line)) {
+      errors.push(`${linePath} must be an object.`)
+      continue
+    }
+    validateUniqueId(line.id, linePath, lineIds, errors)
+    for (const key of ['sourceItemId', 'sourceItemNumber']) {
+      if (!nonEmpty(line[key])) errors.push(`${linePath}.${key} must be a non-empty string.`)
+    }
+    for (const key of ['description', 'unit', 'remarks']) {
+      if (typeof line[key] !== 'string') errors.push(`${linePath}.${key} must be a string.`)
+    }
+    if (line.quotedDescription !== undefined && typeof line.quotedDescription !== 'string') {
+      errors.push(`${linePath}.quotedDescription must be a string when supplied.`)
+    }
+    if (line.quotedUnit !== undefined && typeof line.quotedUnit !== 'string') {
+      errors.push(`${linePath}.quotedUnit must be a string when supplied.`)
+    }
+    if (!Number.isInteger(line.sourceDepth) || line.sourceDepth < 0) {
+      errors.push(`${linePath}.sourceDepth must be a non-negative integer.`)
+    }
+    if (typeof line.sourceHasChildren !== 'boolean') errors.push(`${linePath}.sourceHasChildren must be a boolean.`)
+    if (typeof line.selected !== 'boolean') errors.push(`${linePath}.selected must be a boolean.`)
+    if (!finiteNonNegative(line.quantity)) errors.push(`${linePath}.quantity must be a non-negative number.`)
+    if (!finiteNonNegative(line.quotedQuantity)) {
+      errors.push(`${linePath}.quotedQuantity must be a non-negative number.`)
+    }
+    validateGoodsReceiptGroupPath(line.sourceGroupPath, linePath, errors)
+    if (Array.isArray(line.sourceGroupPath) && line.sourceDepth !== line.sourceGroupPath.length) {
+      errors.push(`${linePath}.sourceDepth must equal sourceGroupPath.length.`)
+    }
+    if (line.selected && line.quantity === 0) warnings.push(`${linePath} is selected with zero quantity.`)
+    if (line.selected && finiteNumber(line.quantity) && finiteNumber(line.quotedQuantity)
+      && line.quantity > line.quotedQuantity) {
+      warnings.push(`${linePath}.quantity exceeds the quoted quantity.`)
+    }
+    if (line.selected && finiteNumber(line.quantity) && line.quantity > 0) exportableLineCount += 1
+  }
+
+  if (exportableLineCount === 0) errors.push(`${path} has no selected positive-quantity lines.`)
+  warnAboutOverlappingGoodsReceiptLines(value.lines, path, warnings)
+}
+
+function validateGoodsReceiptGroupPath(value, linePath, errors) {
+  if (!Array.isArray(value)) {
+    errors.push(`${linePath}.sourceGroupPath must be an array.`)
+    return
+  }
+  value.forEach((group, index) => {
+    const path = `${linePath}.sourceGroupPath[${index}]`
+    if (!isRecord(group)) {
+      errors.push(`${path} must be an object.`)
+      return
+    }
+    for (const key of ['id', 'itemNumber', 'label']) {
+      if (typeof group[key] !== 'string') errors.push(`${path}.${key} must be a string.`)
+    }
+    if (!Number.isInteger(group.depth) || group.depth < 0) {
+      errors.push(`${path}.depth must be a non-negative integer.`)
+    }
+  })
+}
+
+function warnAboutOverlappingGoodsReceiptLines(lines, path, warnings) {
+  const selectedIds = new Set(
+    lines.filter((line) => isRecord(line) && line.selected && line.quantity > 0).map((line) => line.sourceItemId),
+  )
+  lines.forEach((line, index) => {
+    if (!isRecord(line) || !line.selected || line.quantity <= 0 || !Array.isArray(line.sourceGroupPath)) return
+    if (line.sourceGroupPath.some((group) => isRecord(group) && selectedIds.has(group.id))) {
+      warnings.push(`${path}.lines[${index}] is hidden because a selected ancestor is used as one receipt line.`)
+    }
+  })
+}
+
+function createGoodsReceiptLineDrafts(items) {
+  const lines = []
+  let rootItemNumber = 0
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!isRecord(item) || item.kind === 'section_header') continue
+    rootItemNumber += 1
+    collectGoodsReceiptLines(item, String(rootItemNumber), [], lines, 1)
+  }
+  return lines
+}
+
+function collectGoodsReceiptLines(item, itemNumber, groupPath, lines, ancestorQuantityMultiplier) {
+  const extendedQuantity = ancestorQuantityMultiplier * Math.max(finiteNumber(item.quantity) ? item.quantity : 0, 0)
+  const quantity = Math.round((extendedQuantity + Number.EPSILON) * 100) / 100
+  const children = Array.isArray(item.children) ? item.children.filter(isRecord) : []
+  const sourceHasChildren = children.length > 0
+  const description = [text(item.name), text(item.description)].map((value) => value.trim()).filter(Boolean).join(', ')
+  const unit = text(item.quantityUnit).trim()
+
+  lines.push({
+    id: item.id,
+    sourceItemId: item.id,
+    sourceItemNumber: itemNumber,
+    sourceGroupPath: groupPath,
+    sourceDepth: groupPath.length,
+    sourceHasChildren,
+    selected: !sourceHasChildren && quantity > 0,
+    description,
+    quotedDescription: description,
+    quantity,
+    quotedQuantity: quantity,
+    unit,
+    quotedUnit: unit,
+    remarks: '',
+  })
+
+  if (!sourceHasChildren) return
+  const nextGroupPath = [...groupPath, {
+    id: item.id,
+    itemNumber,
+    label: text(item.name).trim() || text(item.description).trim(),
+    depth: groupPath.length,
+  }]
+  children.forEach((child, index) => {
+    collectGoodsReceiptLines(child, `${itemNumber}.${index + 1}`, nextGroupPath, lines, extendedQuantity)
+  })
+}
+
+function applyGoodsReceiptSelectionPreset(lines, preset) {
+  const targetDepth = preset === 'summary' ? 0 : 1
+  lines.forEach((line) => {
+    if (line.quantity <= 0) {
+      line.selected = false
+    } else if (preset === 'detailed') {
+      line.selected = !line.sourceHasChildren
+    } else {
+      line.selected = line.sourceDepth === targetDepth
+        || (!line.sourceHasChildren && line.sourceDepth < targetDepth)
+    }
+  })
+}
+
+function applyGoodsReceiptLineOverrides(lines, value, warnings) {
+  if (value === undefined) return
+  if (!Array.isArray(value)) throw new Error('Goods-receipt lines must be an array of line overrides.')
+
+  value.forEach((override, index) => {
+    if (!isRecord(override)) throw new Error(`Goods-receipt line override ${index + 1} must be an object.`)
+    const line = lines.find((candidate) => (
+      (nonEmpty(override.sourceItemId) && candidate.sourceItemId === override.sourceItemId.trim())
+      || (nonEmpty(override.sourceItemNumber) && candidate.sourceItemNumber === override.sourceItemNumber.trim())
+      || (nonEmpty(override.id) && candidate.id === override.id.trim())
+    ))
+    if (!line) {
+      warnings.push(`Goods-receipt line override ${index + 1} did not match a quotation item and was ignored.`)
+      return
+    }
+    for (const key of ['description', 'unit', 'remarks']) {
+      if (override[key] !== undefined && typeof override[key] !== 'string') {
+        throw new Error(`Goods-receipt line override ${index + 1}.${key} must be a string.`)
+      }
+      if (typeof override[key] === 'string') line[key] = override[key]
+    }
+    if (override.selected !== undefined && typeof override.selected !== 'boolean') {
+      throw new Error(`Goods-receipt line override ${index + 1}.selected must be a boolean.`)
+    }
+    if (typeof override.selected === 'boolean') line.selected = override.selected
+    if (override.quantity !== undefined && !finiteNumber(override.quantity)) {
+      throw new Error(`Goods-receipt line override ${index + 1}.quantity must be a number.`)
+    }
+    if (finiteNumber(override.quantity)) line.quantity = override.quantity
+  })
+}
+
+function createGoodsReceiptNumber(documentDate) {
+  const dateStamp = documentDate.replace(/\D/g, '').slice(0, 8)
+  return dateStamp.length === 8 ? `GR-${dateStamp}` : 'GR'
 }
 
 function buildRootRow(raw, index, baseCurrency, ids, warnings) {
@@ -444,12 +842,40 @@ function text(value) { return typeof value === 'string' ? value : '' }
 function isRecord(value) { return typeof value === 'object' && value !== null && !Array.isArray(value) }
 
 async function main() {
-  const [command, inputPath, outputPath] = process.argv.slice(2)
-  if (command === 'self-test') return runSelfTest(inputPath)
-  if (!['build', 'validate'].includes(command) || !inputPath || (command === 'build' && !outputPath)) {
-    throw new Error('Usage: quotation-json.mjs build <partial.json> <quotation.json> | validate <quotation.json> | self-test')
+  const [command, ...args] = process.argv.slice(2)
+  if (command === 'self-test') return runSelfTest(args[0])
+  if (command === 'set-goods-receipt-draft') {
+    const [quotationPath, receiptPath, outputPath] = args
+    if (!quotationPath || !receiptPath || !outputPath) {
+      throw new Error('Usage: quotation-json.mjs set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json>')
+    }
+    const quotationInput = await readJsonFile(quotationPath)
+    const receiptInput = await readJsonFile(receiptPath)
+    const { envelope, warnings } = setPendingGoodsReceiptDraftInEnvelope(quotationInput, receiptInput)
+    await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
+    printResult({ errors: [], warnings })
+    process.stdout.write(`Built ${resolve(outputPath)}\n`)
+    return
   }
-  const input = JSON.parse((await readFile(resolve(inputPath), 'utf8')).replace(/^\uFEFF/, ''))
+  if (command === 'add-goods-receipt') {
+    const [quotationPath, receiptPath, outputPath] = args
+    if (!quotationPath || !receiptPath || !outputPath) {
+      throw new Error('Usage: quotation-json.mjs add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json>')
+    }
+    const quotationInput = await readJsonFile(quotationPath)
+    const receiptInput = await readJsonFile(receiptPath)
+    const { envelope, warnings } = addGoodsReceiptToEnvelope(quotationInput, receiptInput)
+    await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
+    printResult({ errors: [], warnings })
+    process.stdout.write(`Built ${resolve(outputPath)}\n`)
+    return
+  }
+
+  const [inputPath, outputPath] = args
+  if (!['build', 'validate'].includes(command) || !inputPath || (command === 'build' && !outputPath)) {
+    throw new Error('Usage: quotation-json.mjs build <partial.json> <quotation.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | validate <quotation.json> | self-test')
+  }
+  const input = await readJsonFile(inputPath)
   if (command === 'validate') {
     const result = validateQuotationEnvelope(input)
     printResult(result)
@@ -460,6 +886,10 @@ async function main() {
   await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
   printResult({ errors: [], warnings })
   process.stdout.write(`Built ${resolve(outputPath)}\n`)
+}
+
+async function readJsonFile(filePath) {
+  return JSON.parse((await readFile(resolve(filePath), 'utf8')).replace(/^\uFEFF/, ''))
 }
 
 function printResult({ errors, warnings }) {
@@ -556,6 +986,73 @@ async function runSelfTest(outputPath) {
     if (!repairWarnings.includes(expectedWarning)) {
       throw new Error(`Missing fallback warning: ${expectedWarning}`)
     }
+  }
+
+  const pendingResult = setPendingGoodsReceiptDraftInEnvelope(envelope, {
+    documentDate: '2026-08-19',
+    grNumber: 'GR-20260819-01',
+    customerReference: 'PO-12345',
+    deliveryReference: 'DN-88',
+    deliveryAddress: '88 Harbour Road',
+    remarks: 'Inspect packaging on arrival.',
+    selectionPreset: 'detailed',
+    lines: [
+      { sourceItemNumber: '1.1', selected: true, quantity: 1.5, remarks: 'One crate opened.' },
+      { sourceItemNumber: '1.2', selected: false },
+      { sourceItemNumber: '1.3', selected: false },
+    ],
+  }, new Date('2026-08-19T08:30:00.000Z'))
+  const pendingDraft = pendingResult.envelope.quotation.pendingGoodsReceiptDraft
+  if (pendingDraft.customerReference !== 'PO-12345'
+    || pendingDraft.lines.find((line) => line.sourceItemNumber === '1.1')?.selected !== true
+    || pendingDraft.lines.find((line) => line.sourceItemNumber === '1.2')?.selected !== false
+    || pendingDraft.lines.find((line) => line.sourceItemNumber === '1.3')?.selected !== false) {
+    throw new Error('Pending goods-receipt generation failed.')
+  }
+  const rebuiltWithPendingDraft = buildQuotationEnvelope(
+    pendingResult.envelope,
+    new Date('2026-08-19T08:45:00.000Z'),
+  )
+  if (rebuiltWithPendingDraft.envelope.quotation.pendingGoodsReceiptDraft.customerReference !== 'PO-12345') {
+    throw new Error('Existing pending goods-receipt draft was not preserved.')
+  }
+
+  const receiptResult = addGoodsReceiptToEnvelope(pendingResult.envelope, {
+    exportedAt: '2026-08-19T09:00:00.000Z',
+    filePath: 'C:\\Receipts\\GR-20260819.pdf',
+    draft: {
+      documentDate: '2026-08-19',
+      grNumber: 'GR-20260819-01',
+      customerReference: 'PO-12345',
+      deliveryReference: 'DN-88',
+      deliveryAddress: '88 Harbour Road',
+      remarks: 'Inspect packaging on arrival.',
+      selectionPreset: 'detailed',
+      lines: [{ sourceItemNumber: '1.1', quantity: 1.5, remarks: 'One crate opened.' }],
+    },
+  }, new Date('2026-08-19T09:00:00.000Z'))
+  const receipt = receiptResult.envelope.quotation.goodsReceiptHistory[0]
+  if (receipt.draft.customerReference !== 'PO-12345'
+    || receipt.draft.deliveryAddress !== '88 Harbour Road'
+    || receipt.draft.remarks !== 'Inspect packaging on arrival.'
+    || receipt.draft.lines.find((line) => line.sourceItemNumber === '1.1')?.quantity !== 1.5) {
+    throw new Error('Goods-receipt generation failed.')
+  }
+  if (receiptResult.envelope.quotation.pendingGoodsReceiptDraft !== undefined) {
+    throw new Error('Completed goods receipt did not clear the pending draft.')
+  }
+  const rebuiltWithHistory = buildQuotationEnvelope(
+    receiptResult.envelope,
+    new Date('2026-08-19T10:00:00.000Z'),
+  )
+  if (rebuiltWithHistory.envelope.quotation.goodsReceiptHistory.length !== 1
+    || rebuiltWithHistory.envelope.quotation.goodsReceiptHistory[0].draft.customerReference !== 'PO-12345') {
+    throw new Error('Existing goods-receipt history was not preserved.')
+  }
+  const invalidReceipt = structuredClone(receiptResult.envelope)
+  invalidReceipt.quotation.goodsReceiptHistory[0].draft.lines[0].quantity = -1
+  if (!validateQuotationEnvelope(invalidReceipt).errors.some((error) => error.includes('quantity must be a non-negative'))) {
+    throw new Error('Goods-receipt quantity validation failed.')
   }
   if (outputPath) {
     await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')

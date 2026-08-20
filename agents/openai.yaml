@@ -1,4 +1,4 @@
 interface:
   display_name: "Quotation JSON Generator"
-  short_description: "Build import-ready quotation JSON from source files"
-  default_prompt: "Use $quotation-json-generator to turn this text, image, or PDF into an import-ready quotation JSON file."
+  short_description: "Build quotation JSON with goods-receipt drafts"
+  default_prompt: "Use $quotation-json-generator to create an import-ready quotation JSON and prefill its goods receipt when supplied."

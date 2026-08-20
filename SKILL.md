@@ -1,11 +1,19 @@
 ---
 name: quotation-json-generator
-description: Generate import-ready quotation-software JSON from natural language, images, PDFs, or extracted tables. Use when source material must become a quotation draft JSON file; do not use for unrelated JSON.
+description: Generate or update import-ready Quotation Software JSON from natural language, images, PDFs, or extracted tables, including pending goods-receipt drafts and completed receipt history. Do not use for unrelated JSON.
 ---
 
 # Quotation JSON Generator
 
-Create a complete schema-v2 quotation file that the Quotation Software app can import.
+Create a complete schema-v2 quotation file that the Quotation Software app can import. A prepared receipt that should open in **Generate GR** is stored as `quotation.pendingGoodsReceiptDraft`. Successfully exported receipts move into `quotation.goodsReceiptHistory`.
+
+## Choose a mode
+
+- **Quotation mode:** build a quotation from source material.
+- **Pending goods-receipt mode:** prepare the receipt that the GUI should load after import. Use this when the user supplies quotation and goods-receipt information together.
+- **Goods-receipt history mode:** add an already completed/exported receipt record.
+
+Read [references/goods-receipt.md](references/goods-receipt.md) before either goods-receipt mode. Do not use history mode merely to prefill the GUI.
 
 ## Workflow
 
@@ -20,8 +28,22 @@ Create a complete schema-v2 quotation file that the Quotation Software app can i
    node <skill-folder>\scripts\quotation-json.mjs validate <quotation.json>
    ```
 
-6. Fix every validation error. Review warnings and report unresolved assumptions separately; do not add extraction notes or confidence metadata to the quotation JSON.
-7. Return a clickable link to the generated JSON. If the quotation editor is open and the user asks for direct import, prefer `window.quotationAgent.importQuotationContent()` or `importQuotationFile()` over UI simulation.
+6. To prepare a receipt for the GUI, save the receipt fields as a second UTF-8 JSON file and set the pending draft in the same quotation JSON:
+
+   ```powershell
+   node <skill-folder>\scripts\quotation-json.mjs set-goods-receipt-draft <quotation.json> <receipt.json> <quotation-with-receipt.json>
+   node <skill-folder>\scripts\quotation-json.mjs validate <quotation-with-receipt.json>
+   ```
+
+7. Use history mode only for a receipt that is already completed/exported:
+
+   ```powershell
+   node <skill-folder>\scripts\quotation-json.mjs add-goods-receipt <quotation.json> <receipt.json> <quotation-with-receipt.json>
+   node <skill-folder>\scripts\quotation-json.mjs validate <quotation-with-receipt.json>
+   ```
+
+8. Fix every validation error. Review warnings and report unresolved assumptions separately; do not add extraction notes or confidence metadata to the quotation JSON.
+9. Return a clickable link to the generated JSON. If the quotation editor is open and the user asks for direct import, prefer `window.quotationAgent.importQuotationContent()` or `importQuotationFile()` over UI simulation.
 
 ## Required behavior
 
@@ -34,6 +56,12 @@ Create a complete schema-v2 quotation file that the Quotation Software app can i
 - Never guess exchange rates. A non-base item currency requires an explicit rate in quotation direction.
 - Missing monetary values default to zero and must be disclosed. Zero is an editable placeholder, not an inferred price.
 - Do not silently repair supplied currencies or discard malformed exchange rates or extra charges. Resolve every builder warning before delivery, or disclose it to the user.
+- Map customer PO numbers to `customerReference`, delivery or dispatch document numbers to `deliveryReference`, delivery destination text to `deliveryAddress`, and general receipt notes to `remarks`. Do not put these values in the quotation header.
+- Derive goods-receipt lines and quoted quantities from the quotation. The default `detailed` selection uses positive-quantity leaf lines, matching the app; disclose this default when the user did not state which items or quantities were received.
+- For explicit receipt inclusion/exclusion, set matching line overrides to `selected: true` or `selected: false`. Use received `quantity` and line `remarks` only when supplied or clearly implied.
+- When the user wants to import the JSON and then edit/export the receipt in the GUI, generate `pendingGoodsReceiptDraft`, not a history record.
+- Preserve a real exported PDF path in the history record's `filePath` when supplied. An empty path is allowed with a warning, but it does not prove that the receipt was exported.
+- A successful direct PDF export clears `pendingGoodsReceiptDraft` and adds the completed snapshot to `goodsReceiptHistory`. Browser Print leaves the pending draft unchanged.
 - Validate the final file with the bundled helper before delivery.
 
 Use [assets/quotation-v2-template.json](assets/quotation-v2-template.json) only as a manual starting point. Prefer the builder because it creates fresh IDs and timestamps.
