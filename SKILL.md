@@ -33,6 +33,7 @@ Create a complete schema-v2 quotation file that the Quotation Software app can i
 - Never use `expectedTotal` as a substitute for a price. It only records an expected group total for mismatch checking.
 - Never guess exchange rates. A non-base item currency requires an explicit rate in quotation direction.
 - Missing monetary values default to zero and must be disclosed. Zero is an editable placeholder, not an inferred price.
+- Do not silently repair supplied currencies or discard malformed exchange rates or extra charges. Resolve every builder warning before delivery, or disclose it to the user.
 - Validate the final file with the bundled helper before delivery.
 
 Use [assets/quotation-v2-template.json](assets/quotation-v2-template.json) only as a manual starting point. Prefer the builder because it creates fresh IDs and timestamps.

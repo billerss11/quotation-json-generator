@@ -82,7 +82,7 @@ export function buildQuotationEnvelope(input, now = new Date()) {
     },
     totalsConfig: {
       globalMarkupRate: finiteNumber(totalsSource.globalMarkupRate) ? totalsSource.globalMarkupRate : 0,
-      extraCharges: buildExtraCharges(totalsSource.extraCharges),
+      extraCharges: buildExtraCharges(totalsSource.extraCharges, warnings),
       taxMode: totalsSource.taxMode === 'mixed' ? 'mixed' : 'single',
       taxClasses,
       defaultTaxClassId,
@@ -90,7 +90,7 @@ export function buildQuotationEnvelope(input, now = new Date()) {
         ? [...new Set(totalsSource.mixedTaxColumns.filter((column) => allowedMixedTaxColumns.has(column)))]
         : [...defaultMixedTaxColumns],
     },
-    exchangeRates: buildExchangeRates(source.exchangeRates, baseCurrency),
+    exchangeRates: buildExchangeRates(source.exchangeRates, baseCurrency, warnings),
     branding: {
       logoDataUrl: text(source.branding?.logoDataUrl),
       accentColor: /^#[0-9a-f]{6}$/i.test(source.branding?.accentColor)
@@ -180,9 +180,17 @@ function buildItem(raw, path, baseCurrency, ids, warnings) {
   const pricingMethod = raw.pricingMethod === 'manual_price' || finiteNumber(raw.manualUnitPrice)
     ? 'manual_price'
     : 'cost_plus'
+  const hasCostCurrency = Object.prototype.hasOwnProperty.call(raw, 'costCurrency')
+  const costCurrency = normalizeCurrency(raw.costCurrency)
   if (!name) warnings.push(`${path}: item name was missing.`)
   if (!finiteNumber(raw.quantity)) warnings.push(`${path}: quantity was missing or invalid; used 1.`)
   if (!text(raw.quantityUnit)) warnings.push(`${path}: quantity unit was missing; used EA.`)
+  if (hasCostCurrency && !costCurrency) {
+    throw new Error(`${path}: supplied costCurrency is invalid or unsupported.`)
+  }
+  if (!hasCostCurrency && children.length === 0) {
+    warnings.push(`${path}: cost currency was missing; used base currency ${baseCurrency}.`)
+  }
   if (children.length > 0 && finiteNumber(raw.unitCost) && raw.unitCost !== 0) {
     warnings.push(`${path}: parent unitCost was ignored because the item has children.`)
   }
@@ -195,7 +203,7 @@ function buildItem(raw, path, baseCurrency, ids, warnings) {
     quantityUnit: text(raw.quantityUnit) || 'EA',
     pricingMethod: children.length > 0 ? 'cost_plus' : pricingMethod,
     unitCost: children.length > 0 ? 0 : finiteNumber(raw.unitCost) ? raw.unitCost : 0,
-    costCurrency: normalizeCurrency(raw.costCurrency) ?? baseCurrency,
+    costCurrency: costCurrency ?? baseCurrency,
     notes: text(raw.notes),
     children,
   }
@@ -330,21 +338,52 @@ function validateCompanyProfile(value, errors) {
   }
 }
 
-function buildExtraCharges(value) {
-  if (!Array.isArray(value)) return []
+function buildExtraCharges(value, warnings) {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    warnings.push('Extra charges were invalid and were ignored.')
+    return []
+  }
   const ids = new Set()
-  return value.filter(isRecord).map((charge) => ({
-    id: uniqueId(charge.id, ids),
-    label: text(charge.label),
-    amount: finiteNumber(charge.amount) ? charge.amount : 0,
-  }))
+  return value.flatMap((charge, index) => {
+    if (!isRecord(charge)) {
+      warnings.push(`Extra charge ${index + 1} was not an object and was ignored.`)
+      return []
+    }
+    if (typeof charge.label !== 'string') {
+      warnings.push(`Extra charge ${index + 1} label was missing or invalid; used an empty label.`)
+    }
+    if (!finiteNumber(charge.amount)) {
+      warnings.push(`Extra charge ${index + 1} amount was missing or invalid; used 0.`)
+    }
+    return [{
+      id: uniqueId(charge.id, ids),
+      label: text(charge.label),
+      amount: finiteNumber(charge.amount) ? charge.amount : 0,
+    }]
+  })
 }
 
-function buildExchangeRates(value, baseCurrency) {
+function buildExchangeRates(value, baseCurrency, warnings) {
   const rates = {}
+  if (value !== undefined && !isRecord(value)) {
+    warnings.push('Exchange rates were invalid and were ignored.')
+  }
   if (isRecord(value)) for (const [rawCurrency, rate] of Object.entries(value)) {
     const currency = normalizeCurrency(rawCurrency)
-    if (currency && finiteNumber(rate)) rates[currency] = rate
+    if (!currency) {
+      warnings.push(`Exchange rate entry ${rawCurrency} used an invalid or unsupported currency and was ignored.`)
+      continue
+    }
+    if (!finiteNumber(rate) || rate <= 0 || rate > maxExchangeRate) {
+      warnings.push(`Exchange rate for ${currency} was invalid and was ignored.`)
+      continue
+    }
+    if (currency === baseCurrency && rate !== 1) {
+      warnings.push(`Exchange rate for base currency ${baseCurrency} was replaced with 1.`)
+      continue
+    }
+    rates[currency] = rate
   }
   rates[baseCurrency] = 1
   return rates
@@ -463,6 +502,60 @@ async function runSelfTest(outputPath) {
   invalidCurrency.quotation.exchangeRates = { ZZZ: 1 }
   if (validateQuotationEnvelope(invalidCurrency).errors.length === 0) {
     throw new Error('Unsupported currency validation failed.')
+  }
+
+  const missingCurrency = buildQuotationEnvelope({
+    header: { currency: 'USD', documentLocale: 'en-US' },
+    majorItems: [{ name: 'Unpriced item', quantity: 1, quantityUnit: 'EA', unitCost: 0 }],
+  }, new Date('2026-08-19T08:00:00.000Z'))
+  if (missingCurrency.envelope.quotation.majorItems[0].costCurrency !== 'USD'
+    || !missingCurrency.warnings.some((warning) => warning.includes('cost currency was missing'))) {
+    throw new Error('Missing cost currency warning failed.')
+  }
+
+  let invalidCostCurrencyRejected = false
+  try {
+    buildQuotationEnvelope({
+      header: { currency: 'USD', documentLocale: 'en-US' },
+      majorItems: [{ name: 'Bad currency', costCurrency: 'ZZZ' }],
+    }, new Date('2026-08-19T08:00:00.000Z'))
+  } catch {
+    invalidCostCurrencyRejected = true
+  }
+  if (!invalidCostCurrencyRejected) throw new Error('Invalid item cost currency was not rejected.')
+
+  let invalidUsedRateRejected = false
+  try {
+    buildQuotationEnvelope({
+      header: { currency: 'USD', documentLocale: 'en-US' },
+      exchangeRates: { USD: 1, CNY: 'bad' },
+      majorItems: [{ name: 'Imported item', unitCost: 100, costCurrency: 'CNY' }],
+    }, new Date('2026-08-19T08:00:00.000Z'))
+  } catch {
+    invalidUsedRateRejected = true
+  }
+  if (!invalidUsedRateRejected) throw new Error('Invalid required exchange rate was not rejected.')
+
+  const repairedCommercialFields = buildQuotationEnvelope({
+    header: { currency: 'USD', documentLocale: 'en-US' },
+    totalsConfig: {
+      extraCharges: [null, { label: 42, amount: '100' }],
+    },
+    exchangeRates: { USD: 2, ZZZ: 3, EUR: 'bad' },
+    majorItems: [{ name: 'Manual service', pricingMethod: 'manual_price', manualUnitPrice: 100, costCurrency: 'USD' }],
+  }, new Date('2026-08-19T08:00:00.000Z'))
+  const repairWarnings = repairedCommercialFields.warnings.join('\n')
+  for (const expectedWarning of [
+    'was not an object and was ignored',
+    'label was missing or invalid',
+    'amount was missing or invalid',
+    'base currency USD was replaced with 1',
+    'invalid or unsupported currency and was ignored',
+    'Exchange rate for EUR was invalid and was ignored',
+  ]) {
+    if (!repairWarnings.includes(expectedWarning)) {
+      throw new Error(`Missing fallback warning: ${expectedWarning}`)
+    }
   }
   if (outputPath) {
     await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
