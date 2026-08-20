@@ -1,0 +1,40 @@
+{
+  "skill_name": "quotation-json-generator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I do not have the quotation software on this computer. Create an import-ready USD quotation JSON for two PX-100 pumps at USD 1200 each, manual selling price USD 1500, customer Acme Marine, quotation Q-2026-101. Do not make PDF.",
+      "expected_output": "A validated schema-v2 quotation JSON is delivered without requiring or attempting to use Quotation Software.",
+      "files": [],
+      "expectations": [
+        "The final quotation JSON passes the bundled validator.",
+        "The JSON contains the requested customer, quotation number, quantity, currency, and manual unit selling price.",
+        "Missing software does not prevent JSON delivery and no PDF success is claimed."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Make quotation Q-2026-102 and a pending compact goods receipt for one received pump. I also want both PDFs, but this is my first time using the skill and I have not told you where the portable app is.",
+      "expected_output": "The skill creates and validates the quotation JSON with a pending goods-receipt draft first, asks for the portable .exe path, and does not fabricate PDFs while configuration is missing.",
+      "files": [],
+      "expectations": [
+        "A valid JSON containing pendingGoodsReceiptDraft is produced before PDF setup is resolved.",
+        "The user is asked for the portable Quotation Software executable path or may decline setup.",
+        "The response clearly identifies PDF as pending rather than replacing the renderer or claiming success."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Using my configured quotation software, create quotation and goods-receipt PDFs from a complete bilingual-capable quotation JSON. Use the latest published exchange rates and give me the JSON, both PDFs, and the export result.",
+      "expected_output": "The JSON validates independently, the configured portable app exports both PDFs with refresh enabled, and result JSON records the rate date and exact rates.",
+      "files": [
+        "C:\\Users\\admin\\.codex\\skills\\quotation-json-generator-workspace\\verification\\quotation-with-receipt.json"
+      ],
+      "expectations": [
+        "The quotation JSON passes validation before PDF export starts.",
+        "Both PDFs are produced by the configured Quotation Software executable.",
+        "The export result records exchangeRateDate and the exact applied exchangeRates."
+      ]
+    }
+  ]
+}
