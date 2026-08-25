@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
-const templates = new Set(['legacy', 'technical-bid', 'executive-summary', 'luminous', 'signal', 'atelier'])
+const templates = new Set(['classic', 'technical-bid', 'executive-summary', 'luminous', 'signal', 'atelier'])
 const locales = new Set(['en-US', 'zh-CN'])
 const goodsReceiptTemplates = new Set(['standard', 'compact'])
 const goodsReceiptSelectionPresets = new Set(['summary', 'grouped', 'detailed'])
@@ -58,7 +58,7 @@ export function buildQuotationEnvelope(input, now = new Date()) {
 
   const quotation = {
     id: nonEmpty(source.id) ? source.id.trim() : randomUUID(),
-    templateId: templates.has(source.templateId) ? source.templateId : 'legacy',
+    templateId: normalizeQuotationTemplateId(source.templateId),
     companyProfileId: nonEmpty(source.companyProfileId) ? source.companyProfileId.trim() : null,
     companyProfileSnapshot: buildCompanyProfile(source.companyProfileSnapshot),
     header: {
@@ -834,6 +834,11 @@ function normalizeCurrency(value) {
   return supportedCurrencies.has(currency) ? currency : null
 }
 
+function normalizeQuotationTemplateId(value) {
+  if (value === 'legacy') return 'classic'
+  return templates.has(value) ? value : 'classic'
+}
+
 function positiveInteger(value, fallback) { return Number.isInteger(value) && value > 0 ? value : fallback }
 function finiteNumber(value) { return typeof value === 'number' && Number.isFinite(value) }
 function finiteNonNegative(value) { return finiteNumber(value) && value >= 0 }
@@ -924,6 +929,16 @@ async function runSelfTest(outputPath) {
   }, new Date('2026-08-19T08:00:00.000Z'))
   const result = validateQuotationEnvelope(envelope)
   if (result.errors.length > 0) throw new Error(result.errors.join('\n'))
+  if (envelope.quotation.templateId !== 'classic') {
+    throw new Error('Default quotation template generation failed.')
+  }
+  const migratedTemplate = buildQuotationEnvelope({
+    templateId: 'legacy',
+    header: { currency: 'USD', documentLocale: 'en-US' },
+  }, new Date('2026-08-19T08:00:00.000Z'))
+  if (migratedTemplate.envelope.quotation.templateId !== 'classic') {
+    throw new Error('Legacy quotation template migration failed.')
+  }
   if (envelope.quotation.majorItems[0].children.length !== 3) {
     throw new Error('Nested item generation failed.')
   }

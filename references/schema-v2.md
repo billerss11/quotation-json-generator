@@ -20,7 +20,7 @@ This is the maintained skill reference for the current app contract. The applica
 Required complete output fields:
 
 - `id`: unique non-empty string.
-- `templateId`: `legacy`, `technical-bid`, `executive-summary`, `luminous`, `signal`, or `atelier`.
+- `templateId`: `classic`, `technical-bid`, `executive-summary`, `luminous`, `signal`, or `atelier`.
 - `companyProfileId`: profile ID or `null`.
 - `companyProfileSnapshot`: `{ companyName, email, phone }` strings.
 - `header`: quotation metadata described below.
@@ -147,6 +147,6 @@ When the source is silent, the builder uses these editable defaults and reports 
 - monetary values and global markup `0`;
 - one `0%` tax class;
 - detailed entry mode and output detail level `3`;
-- legacy template and green accent `#047857`.
+- classic template and green accent `#047857`.
 
 These are placeholders, not extracted facts.
