@@ -6,7 +6,7 @@ The automation contract is the complete schema-v2 quotation state, not a command
 | --- | --- | --- |
 | Seller/company profile | `quotation.companyProfileId`, `quotation.companyProfileSnapshot` | The snapshot controls the document. A library selection itself is not required. |
 | Logo and accent color | `quotation.branding.logoDataUrl`, `quotation.branding.accentColor` | Logo is a base64 image data URL; accent is a six-digit hex color. |
-| Template | `quotation.templateId` | Use one of the six quotation templates in `schema-v2.md`. |
+| Template | `quotation.templateId` | Use one of the seven quotation templates in `schema-v2.md`, including `spreadsheet`. |
 | Quotation identity | `quotation.header.quotationNumber`, `revisionNumber`, `quotationDate` | Revision is a positive integer; date is `YYYY-MM-DD`. |
 | Customer and contact | `quotation.header.customerCompany`, `contactPerson`, `contactDetails` | Preserve distinct company/person/contact meanings. |
 | Project and commercial text | `quotation.header.projectName`, `validityPeriod`, `notes`, `terms` | Keep receipt-only delivery data out of these fields. |

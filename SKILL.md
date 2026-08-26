@@ -27,9 +27,11 @@ Never store the executable path inside quotation JSON. A missing, moved, or unco
 - **Pending goods-receipt mode:** prepare the receipt that the GUI should load after import. Use this when the user supplies quotation and goods-receipt information together.
 - **Goods-receipt history mode:** add an already completed/exported receipt record.
 - **PDF delivery:** after the JSON is valid, ask the configured application to export the quotation PDF, goods-receipt PDF, or both.
+- **Open-editor automation:** adjust the active quotation through the versioned renderer API instead of simulating UI actions.
 
 Read [references/goods-receipt.md](references/goods-receipt.md) before either goods-receipt mode. Do not use history mode merely to prefill the GUI.
 Read [references/software-pdf.md](references/software-pdf.md) whenever PDF is requested. Read [references/gui-parity.md](references/gui-parity.md) when composing or reviewing a complete quotation so every document-affecting GUI choice is represented.
+Read [references/agent-api-v2.md](references/agent-api-v2.md) when importing, adjusting, validating, or exporting through an already open quotation editor.
 
 ## Workflow
 
@@ -58,15 +60,23 @@ Read [references/software-pdf.md](references/software-pdf.md) whenever PDF is re
    node <skill-folder>\scripts\quotation-json.mjs validate <quotation-with-receipt.json>
    ```
 
-8. Fix every validation error. Review warnings and report unresolved assumptions separately; do not add extraction notes or confidence metadata to the quotation JSON.
-9. Return a clickable link to the generated JSON even when PDF export is unavailable or fails.
-10. When PDF is requested, export only after step 8 succeeds. Use `scripts/quotation-software.mjs export`; do not simulate clicks or recreate the PDF in another tool. Verify each requested PDF exists before reporting success.
-11. If the quotation editor is already open and the user asks for direct import or adjustment, prefer `window.quotationAgent` over UI simulation when its named method supports the action.
+8. Fix every local validation error. Review warnings and report unresolved assumptions separately; do not add extraction notes or confidence metadata to the quotation JSON.
+9. If the portable application is configured and usable, also run its authoritative V2 validation before delivery:
+
+   ```powershell
+   node <skill-folder>\scripts\quotation-software.mjs validate <quotation.json> --no-network --result-json <validation-result.json>
+   ```
+
+   Application validation strengthens the offline check; it never makes software setup a prerequisite for JSON generation.
+10. Return a clickable link to the generated JSON even when application validation or PDF export is unavailable.
+11. When PDF is requested, export only after validation succeeds. Use `scripts/quotation-software.mjs render`; do not simulate clicks or recreate the PDF in another tool. Verify each requested output exists before reporting success.
+12. If the quotation editor is already open and the user asks for direct import or adjustment, await `window.quotationAgentReady` and prefer `window.quotationAgentV2`. Use `window.quotationAgent` only as a compatibility fallback.
 
 ## Required behavior
 
 - Generate schema version 2, even when an example uses legacy version 1.
 - JSON creation and validation must not depend on the software path, application availability, or PDF success.
+- Respect the shared automation limits: 10 MB quotation JSON, 5 MB serialized pending goods receipt, and a valid PNG/JPEG/GIF/WebP logo no larger than 5 MB or 4096 x 4096 pixels.
 - Compose the final JSON state for document-affecting GUI controls. Do not require a separate CLI mutation when the same state belongs in schema-v2 JSON.
 - Preserve source wording and row order unless the user asks for cleanup.
 - Keep quotation hierarchy to at most three item levels. Section headers are root-only.
@@ -85,5 +95,6 @@ Read [references/software-pdf.md](references/software-pdf.md) whenever PDF is re
 - Headless PDF export uses temporary application storage and does not rewrite the input JSON. Keep the original JSON deliverable; add a completed receipt history record explicitly when the user requests that archival state.
 - Use the configured application for every quotation or goods-receipt PDF. If it is unavailable, deliver JSON and state that PDF is pending rather than substituting another renderer.
 - Validate the final file with the bundled helper before delivery.
+- When the configured application is available, treat its V2 validation result and structured issue paths as authoritative.
 
 Use [assets/quotation-v2-template.json](assets/quotation-v2-template.json) only as a manual starting point. Prefer the builder because it creates fresh IDs and timestamps.

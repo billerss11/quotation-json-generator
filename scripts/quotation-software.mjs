@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
-import { validateQuotationEnvelope } from './quotation-json.mjs'
+import { validateQuotationJsonContent } from './quotation-json.mjs'
 
 const configSchemaVersion = 1
+const apiProbeTimeoutMs = 15_000
 
 export function getDefaultConfigPath() {
   const configRoot = process.env.APPDATA || process.env.XDG_CONFIG_HOME || join(homedir(), '.config')
@@ -61,23 +62,122 @@ export async function acknowledgeMissingSoftware(configPath = getDefaultConfigPa
   return getSoftwareStatus(configPath)
 }
 
-export async function exportDocuments({
+export async function getSoftwareApiInfo(configPath = getDefaultConfigPath(), probeDirectory = process.cwd()) {
+  const status = await getSoftwareStatus(configPath)
+  if (!status.usable || !status.softwarePath) {
+    throw new Error(status.configured
+      ? `The configured Quotation Software executable is missing: ${status.softwarePath}`
+      : 'Quotation Software is not configured.')
+  }
+
+  const probeResultPath = join(
+    resolve(probeDirectory),
+    `.quotation-software-api-info-${process.pid}-${randomUUID()}.json`,
+  )
+
+  try {
+    await mkdir(dirname(probeResultPath), { recursive: true })
+    const processResult = await runExecutable(
+      status.softwarePath,
+      ['--automation', 'api-info', '--result-json', probeResultPath],
+      apiProbeTimeoutMs,
+    )
+    const apiInfo = await readJsonIfPresent(probeResultPath) ?? parseStdoutReport(processResult.stdout)
+    if (processResult.exitCode !== 0 || !apiInfo || typeof apiInfo.apiVersion !== 'string') {
+      throw new Error('The configured executable does not expose the stable automation API. Rebuild or configure the current portable application.')
+    }
+    if (Number(apiInfo.apiVersion.split('.')[0]) < 2) {
+      throw new Error(`Quotation Software automation API ${apiInfo.apiVersion} is too old; version 2 or later is required.`)
+    }
+    return { softwarePath: status.softwarePath, ...apiInfo }
+  } finally {
+    await unlink(probeResultPath).catch(() => undefined)
+  }
+}
+
+export async function validateDocument({
+  inputFile,
+  outputJson,
+  resultJson,
+  progressJson,
+  cancelFile,
+  noNetwork = false,
+  force = false,
+  timeoutMs,
+  configPath = getDefaultConfigPath(),
+}) {
+  return runAutomationDocument({
+    command: 'validate',
+    inputFile,
+    outputJson,
+    resultJson,
+    progressJson,
+    cancelFile,
+    noNetwork,
+    force,
+    timeoutMs,
+    configPath,
+  })
+}
+
+export async function exportDocuments(options) {
+  return renderDocuments(options)
+}
+
+export async function renderDocuments({
   inputFile,
   quotationPdf,
   goodsReceiptPdf,
+  outputJson,
   resultJson,
+  progressJson,
+  cancelFile,
   refreshExchangeRates = false,
+  noNetwork = false,
+  force = false,
+  timeoutMs,
   configPath = getDefaultConfigPath(),
 }) {
+  return runAutomationDocument({
+    command: 'render',
+    inputFile,
+    quotationPdf,
+    goodsReceiptPdf,
+    outputJson,
+    resultJson,
+    progressJson,
+    cancelFile,
+    refreshExchangeRates,
+    noNetwork,
+    force,
+    timeoutMs,
+    configPath,
+  })
+}
+
+async function runAutomationDocument({
+  command,
+  inputFile,
+  quotationPdf,
+  goodsReceiptPdf,
+  outputJson,
+  resultJson,
+  progressJson,
+  cancelFile,
+  refreshExchangeRates = false,
+  noNetwork = false,
+  force = false,
+  timeoutMs,
+  configPath,
+}) {
   const resolvedInputFile = resolve(inputFile)
-  const quotation = await readJson(resolvedInputFile)
-  const validation = validateQuotationEnvelope(quotation)
+  const validation = validateQuotationJsonContent(await readFile(resolvedInputFile, 'utf8'))
 
   if (validation.errors.length > 0) {
     throw new Error(`Quotation JSON is invalid:\n- ${validation.errors.join('\n- ')}`)
   }
-  if (!quotationPdf && !goodsReceiptPdf) {
-    throw new Error('PDF export requires --quotation-pdf, --goods-receipt-pdf, or both.')
+  if (command === 'render' && !quotationPdf && !goodsReceiptPdf && !outputJson) {
+    throw new Error('Render requires --quotation-pdf, --goods-receipt-pdf, --output-json, or a combination.')
   }
 
   const status = await getSoftwareStatus(configPath)
@@ -89,28 +189,41 @@ export async function exportDocuments({
 
   const resolvedQuotationPdf = quotationPdf ? resolve(quotationPdf) : undefined
   const resolvedGoodsReceiptPdf = goodsReceiptPdf ? resolve(goodsReceiptPdf) : undefined
+  const resolvedOutputJson = outputJson ? resolve(outputJson) : undefined
   const resolvedResultJson = resultJson ? resolve(resultJson) : undefined
-  const args = [
-    '--headless-export',
-    '--input',
-    resolvedInputFile,
-    ...(resolvedQuotationPdf ? ['--quotation-pdf', resolvedQuotationPdf] : []),
-    ...(resolvedGoodsReceiptPdf ? ['--goods-receipt-pdf', resolvedGoodsReceiptPdf] : []),
-    ...(refreshExchangeRates ? ['--refresh-exchange-rates'] : []),
-    ...(resolvedResultJson ? ['--result-json', resolvedResultJson] : []),
-  ]
+  const resolvedProgressJson = progressJson ? resolve(progressJson) : undefined
+  const resolvedCancelFile = cancelFile ? resolve(cancelFile) : undefined
+  const args = createAutomationArguments({
+    command,
+    inputFile: resolvedInputFile,
+    quotationPdf: resolvedQuotationPdf,
+    goodsReceiptPdf: resolvedGoodsReceiptPdf,
+    outputJson: resolvedOutputJson,
+    resultJson: resolvedResultJson,
+    progressJson: resolvedProgressJson,
+    cancelFile: resolvedCancelFile,
+    refreshExchangeRates,
+    noNetwork,
+    force,
+    timeoutMs,
+  })
 
-  for (const outputPath of [resolvedQuotationPdf, resolvedGoodsReceiptPdf, resolvedResultJson]) {
+  for (const outputPath of [
+    resolvedQuotationPdf, resolvedGoodsReceiptPdf, resolvedOutputJson, resolvedResultJson, resolvedProgressJson,
+  ]) {
     if (outputPath) await mkdir(dirname(outputPath), { recursive: true })
   }
+  await getSoftwareApiInfo(configPath, dirname(resolvedResultJson ?? resolvedInputFile))
 
   const processResult = await runExecutable(status.softwarePath, args)
   const report = resolvedResultJson ? await readJsonIfPresent(resolvedResultJson) : parseStdoutReport(processResult.stdout)
 
   if (processResult.exitCode !== 0) {
-    throw new Error(report?.error || processResult.stderr.trim() || `Quotation Software exited with code ${processResult.exitCode}.`)
+    throw new Error(formatExecutionError(report, processResult))
   }
-  for (const outputPath of [resolvedQuotationPdf, resolvedGoodsReceiptPdf]) {
+  for (const outputPath of [
+    resolvedQuotationPdf, resolvedGoodsReceiptPdf, resolvedOutputJson, resolvedResultJson, resolvedProgressJson,
+  ]) {
     if (outputPath && !(await isFile(outputPath))) {
       throw new Error(`Quotation Software reported success but did not create: ${outputPath}`)
     }
@@ -120,6 +233,44 @@ export async function exportDocuments({
     softwarePath: status.softwarePath,
     ...(report ?? { ok: true }),
   }
+}
+
+export function createAutomationArguments({
+  command,
+  inputFile,
+  quotationPdf,
+  goodsReceiptPdf,
+  outputJson,
+  resultJson,
+  progressJson,
+  cancelFile,
+  refreshExchangeRates = false,
+  noNetwork = false,
+  force = false,
+  timeoutMs,
+}) {
+  if (!['validate', 'render'].includes(command)) throw new Error('Automation command must be validate or render.')
+  if (refreshExchangeRates && noNetwork) {
+    throw new Error('--refresh-exchange-rates cannot be used with --no-network.')
+  }
+  if (command === 'validate' && refreshExchangeRates) {
+    throw new Error('--refresh-exchange-rates is only supported by render.')
+  }
+
+  return [
+    '--automation', command,
+    '--input', inputFile,
+    ...(quotationPdf ? ['--quotation-pdf', quotationPdf] : []),
+    ...(goodsReceiptPdf ? ['--goods-receipt-pdf', goodsReceiptPdf] : []),
+    ...(outputJson ? ['--output-json', outputJson] : []),
+    ...(resultJson ? ['--result-json', resultJson] : []),
+    ...(progressJson ? ['--progress-json', progressJson] : []),
+    ...(cancelFile ? ['--cancel-file', cancelFile] : []),
+    ...(timeoutMs !== undefined ? ['--timeout-ms', String(timeoutMs)] : []),
+    ...(refreshExchangeRates ? ['--refresh-exchange-rates'] : []),
+    ...(noNetwork ? ['--no-network'] : []),
+    ...(force ? ['--force'] : []),
+  ]
 }
 
 async function main() {
@@ -139,22 +290,33 @@ async function main() {
     printJson(await acknowledgeMissingSoftware(configPath))
     return
   }
-  if (command === 'export') {
+  if (command === 'api-info') {
+    printJson(await getSoftwareApiInfo(configPath))
+    return
+  }
+  if (['validate', 'render', 'export'].includes(command)) {
     if (!positional[0]) {
-      throw new Error('Usage: quotation-software.mjs export <quotation.json> [--quotation-pdf <pdf>] [--goods-receipt-pdf <pdf>] [--refresh-exchange-rates] [--result-json <json>] [--config <config.json>]')
+      throw new Error('Usage: quotation-software.mjs validate|render <quotation.json> [automation options]')
     }
-    printJson(await exportDocuments({
+    const operation = command === 'validate' ? validateDocument : renderDocuments
+    printJson(await operation({
       inputFile: positional[0],
       quotationPdf: options.quotationPdf,
       goodsReceiptPdf: options.goodsReceiptPdf,
+      outputJson: options.outputJson,
       resultJson: options.resultJson,
+      progressJson: options.progressJson,
+      cancelFile: options.cancelFile,
       refreshExchangeRates: options.refreshExchangeRates === true,
+      noNetwork: options.noNetwork === true,
+      force: options.force === true,
+      timeoutMs: options.timeoutMs,
       configPath,
     }))
     return
   }
 
-  throw new Error('Usage: quotation-software.mjs status | configure <quotation-software.exe> | skip-setup | export <quotation.json> [PDF options]')
+  throw new Error('Usage: quotation-software.mjs status | api-info | configure <quotation-software.exe> | skip-setup | validate <quotation.json> | render <quotation.json> [options]')
 }
 
 function parseArguments(args) {
@@ -165,13 +327,25 @@ function parseArguments(args) {
     ['--config', 'config'],
     ['--quotation-pdf', 'quotationPdf'],
     ['--goods-receipt-pdf', 'goodsReceiptPdf'],
+    ['--output-json', 'outputJson'],
     ['--result-json', 'resultJson'],
+    ['--progress-json', 'progressJson'],
+    ['--cancel-file', 'cancelFile'],
+    ['--timeout-ms', 'timeoutMs'],
   ])
 
   for (let index = 0; index < rest.length; index += 1) {
     const argument = rest[index]
     if (argument === '--refresh-exchange-rates') {
       options.refreshExchangeRates = true
+      continue
+    }
+    if (argument === '--no-network') {
+      options.noNetwork = true
+      continue
+    }
+    if (argument === '--force' || argument === '--overwrite') {
+      options.force = true
       continue
     }
     if (valueOptions.has(argument)) {
@@ -231,7 +405,7 @@ async function isFile(filePath) {
   }
 }
 
-function runExecutable(executablePath, args) {
+export function runExecutable(executablePath, args, executionTimeoutMs) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(executablePath, args, {
       windowsHide: true,
@@ -240,14 +414,48 @@ function runExecutable(executablePath, args) {
     })
     let stdout = ''
     let stderr = ''
+    let timedOut = false
+    let settled = false
+    const timeout = executionTimeoutMs
+      ? setTimeout(() => {
+          timedOut = true
+          terminateProcessTree(child)
+        }, executionTimeoutMs)
+      : null
+
+    const finish = (callback) => {
+      if (settled) return
+      settled = true
+      if (timeout) clearTimeout(timeout)
+      callback()
+    }
 
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
-    child.once('error', reject)
-    child.once('close', exitCode => resolvePromise({ exitCode, stdout, stderr }))
+    child.once('error', error => finish(() => reject(error)))
+    child.once('close', exitCode => finish(() => {
+      if (timedOut) {
+        reject(new Error(`Quotation Software did not exit within ${executionTimeoutMs} ms. The executable may predate the stable automation CLI.`))
+        return
+      }
+      resolvePromise({ exitCode, stdout, stderr })
+    }))
   })
+}
+
+function terminateProcessTree(child) {
+  if (process.platform !== 'win32' || !child.pid) {
+    child.kill('SIGKILL')
+    return
+  }
+  const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+    windowsHide: true,
+    shell: false,
+    stdio: 'ignore',
+  })
+  killer.once('error', () => child.kill('SIGKILL'))
 }
 
 function parseStdoutReport(stdout) {
@@ -260,6 +468,18 @@ function parseStdoutReport(stdout) {
     }
   }
   return null
+}
+
+function formatExecutionError(report, processResult) {
+  if (Array.isArray(report?.errors) && report.errors.length > 0) {
+    return report.errors
+      .map((error) => [error?.code, error?.message].filter(Boolean).join(': '))
+      .filter(Boolean)
+      .join('; ')
+  }
+  if (typeof report?.error === 'string' && report.error.trim()) return report.error
+  if (typeof report?.error?.message === 'string' && report.error.message.trim()) return report.error.message
+  return processResult.stderr.trim() || `Quotation Software exited with code ${processResult.exitCode}.`
 }
 
 function cleanPathInput(value) {

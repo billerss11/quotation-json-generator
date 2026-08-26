@@ -6,7 +6,9 @@ import { resolve } from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
-const templates = new Set(['classic', 'technical-bid', 'executive-summary', 'luminous', 'signal', 'atelier'])
+const templates = new Set([
+  'classic', 'technical-bid', 'executive-summary', 'luminous', 'signal', 'atelier', 'spreadsheet',
+])
 const locales = new Set(['en-US', 'zh-CN'])
 const goodsReceiptTemplates = new Set(['standard', 'compact'])
 const goodsReceiptSelectionPresets = new Set(['summary', 'grouped', 'detailed'])
@@ -16,7 +18,52 @@ const allowedMixedTaxColumns = new Set([
 const defaultMixedTaxColumns = ['taxRate', 'unitPrice', 'unitPriceWithTax', 'netAmount', 'grossAmount']
 const maxMarkupRate = 1000
 const maxTaxRate = 100
+const minExchangeRate = 0.000001
 const maxExchangeRate = 1_000_000
+const mebibyte = 1024 * 1024
+export const automationLimits = {
+  quotationJsonBytes: 10 * mebibyte,
+  logoBytes: 5 * mebibyte,
+  logoDimensionPixels: 4096,
+  goodsReceiptDraftBytes: 5 * mebibyte,
+}
+const allowedEnvelopeFields = new Set(['schemaVersion', 'app', 'exportedAt', 'quotation'])
+const allowedQuotationFields = new Set([
+  'id', 'templateId', 'companyProfileId', 'companyProfileSnapshot', 'header', 'majorItems',
+  'lineItemEntryMode', 'outputSettings', 'totalsConfig', 'exchangeRates', 'branding', 'metadata',
+  'pendingGoodsReceiptDraft', 'goodsReceiptHistory',
+])
+const allowedCompanyProfileFields = new Set(['companyName', 'email', 'phone'])
+const allowedHeaderFields = new Set([
+  'quotationNumber', 'revisionNumber', 'quotationDate', 'customerCompany', 'contactPerson',
+  'contactDetails', 'projectName', 'validityPeriod', 'currency', 'documentLocale', 'notes', 'terms',
+])
+const allowedOutputSettingsFields = new Set(['itemDetailLevel'])
+const allowedItemFields = new Set([
+  'id', 'name', 'description', 'quantity', 'quantityUnit', 'pricingMethod', 'manualUnitPrice',
+  'unitCost', 'costCurrency', 'markupRate', 'taxClassId', 'expectedTotal', 'notes', 'children',
+])
+const allowedSectionHeaderFields = new Set(['id', 'kind', 'title'])
+const allowedTotalsFields = new Set([
+  'globalMarkupRate', 'extraCharges', 'taxMode', 'taxClasses', 'defaultTaxClassId',
+  'mixedTaxColumns', 'taxRate',
+])
+const allowedTaxClassFields = new Set(['id', 'label', 'rate'])
+const allowedExtraChargeFields = new Set(['id', 'label', 'amount'])
+const allowedBrandingFields = new Set(['logoDataUrl', 'accentColor'])
+const allowedMetadataFields = new Set(['createdAt', 'updatedAt'])
+const allowedGoodsReceiptDraftFields = new Set([
+  'quotationId', 'quotationNumber', 'quotationDate', 'grNumber', 'documentDate', 'customerReference',
+  'deliveryReference', 'receivingCompany', 'deliveryAddress', 'deliveryContact', 'contactDetails',
+  'supplierCompany', 'supplierContact', 'projectName', 'preparedBy', 'remarks', 'templateId', 'lines',
+])
+const allowedGoodsReceiptLineFields = new Set([
+  'id', 'sourceItemId', 'sourceItemNumber', 'sourceGroupPath', 'sourceDepth', 'sourceHasChildren',
+  'selected', 'description', 'quotedDescription', 'quantity', 'quotedQuantity', 'unit', 'quotedUnit',
+  'remarks',
+])
+const allowedGoodsReceiptGroupPathFields = new Set(['id', 'itemNumber', 'label', 'depth'])
+const allowedGoodsReceiptRecordFields = new Set(['id', 'exportedAt', 'filePath', 'draft'])
 const supportedCurrencies = new Set(
   typeof Intl.supportedValuesOf === 'function'
     ? Intl.supportedValuesOf('currency')
@@ -125,12 +172,17 @@ export function validateQuotationEnvelope(value) {
   const errors = []
   const warnings = []
   if (!isRecord(value)) return { errors: ['Root value must be an object.'], warnings }
+  validateAllowedFields(value, allowedEnvelopeFields, 'root', errors)
+  if (getUtf8ByteLength(JSON.stringify(value)) > automationLimits.quotationJsonBytes) {
+    errors.push(`Quotation JSON exceeds the ${automationLimits.quotationJsonBytes} byte limit.`)
+  }
   if (value.schemaVersion !== 2) errors.push('schemaVersion must be 2.')
   if (value.app !== 'quotation-software') errors.push('app must be quotation-software.')
   if (!canonicalIso(value.exportedAt)) errors.push('exportedAt must be a canonical UTC ISO timestamp.')
   if (!isRecord(value.quotation)) return { errors: [...errors, 'quotation must be an object.'], warnings }
 
   const quotation = value.quotation
+  validateAllowedFields(quotation, allowedQuotationFields, 'quotation', errors)
   if (!nonEmpty(quotation.id)) errors.push('quotation.id must be non-empty.')
   if (!templates.has(quotation.templateId)) errors.push('quotation.templateId is unsupported.')
   if (!(quotation.companyProfileId === null || nonEmpty(quotation.companyProfileId))) {
@@ -143,6 +195,8 @@ export function validateQuotationEnvelope(value) {
   }
   if (![1, 2, 3].includes(quotation.outputSettings?.itemDetailLevel)) {
     errors.push('outputSettings.itemDetailLevel must be 1, 2, or 3.')
+  } else {
+    validateAllowedFields(quotation.outputSettings, allowedOutputSettingsFields, 'outputSettings', errors)
   }
 
   const taxClassIds = validateTotals(quotation.totalsConfig, errors)
@@ -162,11 +216,17 @@ export function validateQuotationEnvelope(value) {
     || typeof quotation.branding.logoDataUrl !== 'string'
     || !/^#[0-9a-f]{6}$/i.test(quotation.branding.accentColor)) {
     errors.push('branding must contain a string logoDataUrl and six-digit hex accentColor.')
+  } else {
+    validateAllowedFields(quotation.branding, allowedBrandingFields, 'branding', errors)
+    const logoValidation = validateLogoDataUrl(quotation.branding.logoDataUrl)
+    if (!logoValidation.ok) errors.push(`branding.logoDataUrl: ${logoValidation.message}`)
   }
   if (!isRecord(quotation.metadata)
     || !canonicalIso(quotation.metadata.createdAt)
     || !canonicalIso(quotation.metadata.updatedAt)) {
     errors.push('metadata must contain canonical createdAt and updatedAt ISO timestamps.')
+  } else {
+    validateAllowedFields(quotation.metadata, allowedMetadataFields, 'metadata', errors)
   }
   if (quotation.pendingGoodsReceiptDraft !== undefined) {
     validateGoodsReceiptDraftAtPath(
@@ -179,6 +239,23 @@ export function validateQuotationEnvelope(value) {
   }
   validateGoodsReceiptHistory(quotation.goodsReceiptHistory, quotation, errors, warnings)
   return { errors, warnings: [...new Set(warnings)] }
+}
+
+export function validateQuotationJsonContent(content) {
+  if (typeof content !== 'string') {
+    return { errors: ['Quotation JSON content must be a string.'], warnings: [] }
+  }
+  if (getUtf8ByteLength(content) > automationLimits.quotationJsonBytes) {
+    return {
+      errors: [`Quotation JSON exceeds the ${automationLimits.quotationJsonBytes} byte limit.`],
+      warnings: [],
+    }
+  }
+  try {
+    return validateQuotationEnvelope(JSON.parse(content.replace(/^\uFEFF/, '')))
+  } catch (error) {
+    return { errors: [`Quotation JSON could not be parsed: ${error.message}`], warnings: [] }
+  }
 }
 
 export function setPendingGoodsReceiptDraftInEnvelope(value, input, now = new Date()) {
@@ -342,18 +419,23 @@ function validateGoodsReceiptHistory(value, quotation, errors, warnings) {
       errors.push(`${path} must be an object.`)
       return
     }
+    validateAllowedFields(record, allowedGoodsReceiptRecordFields, path, errors)
     validateUniqueId(record.id, path, recordIds, errors)
     if (!canonicalIso(record.exportedAt)) errors.push(`${path}.exportedAt must be a canonical UTC ISO timestamp.`)
     if (typeof record.filePath !== 'string') errors.push(`${path}.filePath must be a string.`)
     else if (!record.filePath.trim()) warnings.push(`${path}.filePath is empty and does not point to an exported PDF.`)
-    validateGoodsReceiptDraftAtPath(record.draft, `${path}.draft`, quotation, errors, warnings)
+    validateGoodsReceiptDraftAtPath(record.draft, `${path}.draft`, quotation, errors, warnings, false)
   })
 }
 
-function validateGoodsReceiptDraftAtPath(value, path, quotation, errors, warnings) {
+function validateGoodsReceiptDraftAtPath(value, path, quotation, errors, warnings, enforceSizeLimit = true) {
   if (!isRecord(value)) {
     errors.push(`${path} must be an object.`)
     return
+  }
+  validateAllowedFields(value, allowedGoodsReceiptDraftFields, path, errors)
+  if (enforceSizeLimit && getUtf8ByteLength(JSON.stringify(value)) > automationLimits.goodsReceiptDraftBytes) {
+    errors.push(`${path} exceeds the ${automationLimits.goodsReceiptDraftBytes} byte limit.`)
   }
 
   for (const key of [
@@ -388,6 +470,7 @@ function validateGoodsReceiptDraftAtPath(value, path, quotation, errors, warning
       errors.push(`${linePath} must be an object.`)
       continue
     }
+    validateAllowedFields(line, allowedGoodsReceiptLineFields, linePath, errors)
     validateUniqueId(line.id, linePath, lineIds, errors)
     for (const key of ['sourceItemId', 'sourceItemNumber']) {
       if (!nonEmpty(line[key])) errors.push(`${linePath}.${key} must be a non-empty string.`)
@@ -437,6 +520,7 @@ function validateGoodsReceiptGroupPath(value, linePath, errors) {
       errors.push(`${path} must be an object.`)
       return
     }
+    validateAllowedFields(group, allowedGoodsReceiptGroupPathFields, path, errors)
     for (const key of ['id', 'itemNumber', 'label']) {
       if (typeof group[key] !== 'string') errors.push(`${path}.${key} must be a string.`)
     }
@@ -581,7 +665,8 @@ function buildItem(raw, path, baseCurrency, ids, warnings) {
   const hasCostCurrency = Object.prototype.hasOwnProperty.call(raw, 'costCurrency')
   const costCurrency = normalizeCurrency(raw.costCurrency)
   if (!name) warnings.push(`${path}: item name was missing.`)
-  if (!finiteNumber(raw.quantity)) warnings.push(`${path}: quantity was missing or invalid; used 1.`)
+  const validQuantity = finiteNumber(raw.quantity) && raw.quantity > 0
+  if (!validQuantity) warnings.push(`${path}: quantity was missing or invalid; used 1.`)
   if (!text(raw.quantityUnit)) warnings.push(`${path}: quantity unit was missing; used EA.`)
   if (hasCostCurrency && !costCurrency) {
     throw new Error(`${path}: supplied costCurrency is invalid or unsupported.`)
@@ -597,7 +682,7 @@ function buildItem(raw, path, baseCurrency, ids, warnings) {
     id: uniqueId(raw.id, ids),
     name: name || 'Unnamed item',
     description: text(raw.description),
-    quantity: finiteNumber(raw.quantity) ? raw.quantity : 1,
+    quantity: validQuantity ? raw.quantity : 1,
     quantityUnit: text(raw.quantityUnit) || 'EA',
     pricingMethod: children.length > 0 ? 'cost_plus' : pricingMethod,
     unitCost: children.length > 0 ? 0 : finiteNumber(raw.unitCost) ? raw.unitCost : 0,
@@ -620,6 +705,7 @@ function buildItem(raw, path, baseCurrency, ids, warnings) {
 function validateRootRow(row, path, ids, currencies, taxIds, errors, warnings) {
   if (!isRecord(row)) return errors.push(`${path} must be an object.`)
   if (row.kind === 'section_header') {
+    validateAllowedFields(row, allowedSectionHeaderFields, path, errors)
     validateUniqueId(row.id, path, ids, errors)
     if (typeof row.title !== 'string') errors.push(`${path}.title must be a string.`)
     return
@@ -629,11 +715,12 @@ function validateRootRow(row, path, ids, currencies, taxIds, errors, warnings) {
 
 function validateItem(item, path, depth, ids, currencies, taxIds, errors, warnings) {
   if (!isRecord(item)) return errors.push(`${path} must be an object.`)
+  validateAllowedFields(item, allowedItemFields, path, errors)
   validateUniqueId(item.id, path, ids, errors)
   for (const key of ['name', 'description', 'quantityUnit', 'notes']) {
     if (typeof item[key] !== 'string') errors.push(`${path}.${key} must be a string.`)
   }
-  if (!finiteNonNegative(item.quantity)) errors.push(`${path}.quantity must be a non-negative number.`)
+  if (!finiteNumber(item.quantity) || item.quantity <= 0) errors.push(`${path}.quantity must be greater than zero.`)
   if (!['cost_plus', 'manual_price'].includes(item.pricingMethod)) errors.push(`${path}.pricingMethod is invalid.`)
   if (!finiteNonNegative(item.unitCost)) errors.push(`${path}.unitCost must be a non-negative number.`)
   const currency = normalizeCurrency(item.costCurrency)
@@ -684,18 +771,24 @@ function validateTotals(value, errors) {
     errors.push('totalsConfig must be an object.')
     return ids
   }
+  validateAllowedFields(value, allowedTotalsFields, 'totalsConfig', errors)
   if (!finiteNonNegative(value.globalMarkupRate) || value.globalMarkupRate > maxMarkupRate) {
     errors.push(`globalMarkupRate must be between 0 and ${maxMarkupRate}.`)
   }
+  const extraChargeIds = new Set()
   if (!Array.isArray(value.extraCharges)) errors.push('extraCharges must be an array.')
   else value.extraCharges.forEach((charge, index) => {
+    if (isRecord(charge)) validateAllowedFields(charge, allowedExtraChargeFields, `extraCharges[${index}]`, errors)
     if (!isRecord(charge) || !nonEmpty(charge.id) || typeof charge.label !== 'string'
       || !finiteNonNegative(charge.amount)) errors.push(`extraCharges[${index}] is invalid.`)
+    else if (extraChargeIds.has(charge.id)) errors.push(`Duplicate extra charge ID: ${charge.id}.`)
+    else extraChargeIds.add(charge.id)
   })
   if (!['single', 'mixed'].includes(value.taxMode)) errors.push('taxMode must be single or mixed.')
   if (!Array.isArray(value.taxClasses) || value.taxClasses.length === 0) {
     errors.push('taxClasses must contain at least one class.')
   } else value.taxClasses.forEach((taxClass, index) => {
+    if (isRecord(taxClass)) validateAllowedFields(taxClass, allowedTaxClassFields, `taxClasses[${index}]`, errors)
     if (!isRecord(taxClass) || !nonEmpty(taxClass.id) || typeof taxClass.label !== 'string'
       || !finiteNonNegative(taxClass.rate) || taxClass.rate > maxTaxRate) {
       errors.push(`taxClasses[${index}] is invalid.`)
@@ -706,12 +799,19 @@ function validateTotals(value, errors) {
   if (!Array.isArray(value.mixedTaxColumns)
     || value.mixedTaxColumns.some((column) => !allowedMixedTaxColumns.has(column))) {
     errors.push('mixedTaxColumns contains an invalid column.')
+  } else if (new Set(value.mixedTaxColumns).size !== value.mixedTaxColumns.length) {
+    errors.push('mixedTaxColumns must not contain duplicates.')
+  }
+  if (value.taxRate !== undefined
+    && (!finiteNonNegative(value.taxRate) || value.taxRate > maxTaxRate)) {
+    errors.push(`taxRate must be between 0 and ${maxTaxRate}.`)
   }
   return ids
 }
 
 function validateHeader(value, errors) {
   if (!isRecord(value)) return errors.push('header must be an object.')
+  validateAllowedFields(value, allowedHeaderFields, 'header', errors)
   for (const key of [
     'quotationNumber', 'quotationDate', 'customerCompany', 'contactPerson', 'contactDetails',
     'projectName', 'validityPeriod', 'notes', 'terms',
@@ -733,6 +833,8 @@ function validateCompanyProfile(value, errors) {
   if (!isRecord(value)
     || ['companyName', 'email', 'phone'].some((key) => typeof value[key] !== 'string')) {
     errors.push('companyProfileSnapshot must contain companyName, email, and phone strings.')
+  } else {
+    validateAllowedFields(value, allowedCompanyProfileFields, 'companyProfileSnapshot', errors)
   }
 }
 
@@ -773,7 +875,7 @@ function buildExchangeRates(value, baseCurrency, warnings) {
       warnings.push(`Exchange rate entry ${rawCurrency} used an invalid or unsupported currency and was ignored.`)
       continue
     }
-    if (!finiteNumber(rate) || rate <= 0 || rate > maxExchangeRate) {
+    if (!finiteNumber(rate) || rate < minExchangeRate || rate > maxExchangeRate) {
       warnings.push(`Exchange rate for ${currency} was invalid and was ignored.`)
       continue
     }
@@ -790,13 +892,13 @@ function buildExchangeRates(value, baseCurrency, warnings) {
 function validateExchangeRates(value, baseCurrency, usedCurrencies, errors) {
   if (!isRecord(value)) return errors.push('exchangeRates must be an object.')
   for (const [currency, rate] of Object.entries(value)) {
-    if (!normalizeCurrency(currency) || !finiteNumber(rate) || rate <= 0 || rate > maxExchangeRate) {
+    if (!normalizeCurrency(currency) || !finiteNumber(rate) || rate < minExchangeRate || rate > maxExchangeRate) {
       errors.push(`Invalid exchange rate for ${currency}.`)
     }
   }
   if (value[baseCurrency] !== 1) errors.push(`Base currency ${baseCurrency} must have exchange rate 1.`)
   for (const currency of usedCurrencies) {
-    if (!finiteNumber(value[currency]) || value[currency] <= 0) {
+    if (!finiteNumber(value[currency]) || value[currency] < minExchangeRate) {
       errors.push(`Missing exchange rate for item currency ${currency}.`)
     }
   }
@@ -806,6 +908,154 @@ function validateUniqueId(id, path, ids, errors) {
   if (!nonEmpty(id)) errors.push(`${path}.id must be non-empty.`)
   else if (ids.has(id)) errors.push(`Duplicate item ID: ${id}.`)
   else ids.add(id)
+}
+
+function validateAllowedFields(value, allowedFields, path, errors) {
+  for (const field of Object.keys(value)) {
+    if (!allowedFields.has(field)) errors.push(`${path}.${field} is not supported.`)
+  }
+}
+
+export function validateLogoDataUrl(value) {
+  if (value === '') return { ok: true, byteLength: 0, width: 0, height: 0 }
+  const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([a-z0-9+/]+={0,2})$/i.exec(value)
+  if (!match) return invalidImage('Logo must be a supported base64 image data URL.')
+
+  const mimeType = match[1].toLowerCase()
+  const base64 = match[2]
+  const maximumBase64Length = Math.ceil(automationLimits.logoBytes / 3) * 4
+  if (base64.length === 0 || base64.length % 4 !== 0 || base64.length > maximumBase64Length) {
+    return base64.length > maximumBase64Length
+      ? logoTooLarge()
+      : invalidImage('Logo base64 encoding is invalid.')
+  }
+
+  let bytes
+  try {
+    const buffer = Buffer.from(base64, 'base64')
+    if (buffer.toString('base64') !== base64) return invalidImage('Logo base64 encoding is invalid.')
+    bytes = Uint8Array.from(buffer)
+  } catch {
+    return invalidImage('Logo base64 encoding is invalid.')
+  }
+  if (bytes.byteLength > automationLimits.logoBytes) return logoTooLarge()
+
+  const dimensions = readImageDimensions(bytes, mimeType)
+  if (!dimensions) return invalidImage('Logo MIME type does not match valid image bytes.')
+  if (dimensions.width <= 0
+    || dimensions.height <= 0
+    || dimensions.width > automationLimits.logoDimensionPixels
+    || dimensions.height > automationLimits.logoDimensionPixels) {
+    return {
+      ok: false,
+      code: 'image_dimensions_too_large',
+      message: `Logo dimensions must not exceed ${automationLimits.logoDimensionPixels} x ${automationLimits.logoDimensionPixels} pixels.`,
+    }
+  }
+
+  return { ok: true, mimeType, byteLength: bytes.byteLength, ...dimensions }
+}
+
+function readImageDimensions(bytes, mimeType) {
+  if (mimeType === 'image/png') return readPngDimensions(bytes)
+  if (mimeType === 'image/jpeg') return readJpegDimensions(bytes)
+  if (mimeType === 'image/gif') return readGifDimensions(bytes)
+  return readWebpDimensions(bytes)
+}
+
+function readPngDimensions(bytes) {
+  if (bytes.length < 24
+    || !hasBytes(bytes, 0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    || !hasBytes(bytes, 12, [0x49, 0x48, 0x44, 0x52])) return null
+  return { width: readUint32BigEndian(bytes, 16), height: readUint32BigEndian(bytes, 20) }
+}
+
+function readGifDimensions(bytes) {
+  if (bytes.length < 10 || (!hasAscii(bytes, 0, 'GIF87a') && !hasAscii(bytes, 0, 'GIF89a'))) return null
+  return { width: bytes[6] | bytes[7] << 8, height: bytes[8] | bytes[9] << 8 }
+}
+
+function readJpegDimensions(bytes) {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null
+  let offset = 2
+  while (offset + 8 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1
+      continue
+    }
+    while (bytes[offset] === 0xff) offset += 1
+    const marker = bytes[offset]
+    offset += 1
+    if (marker === 0xd8 || marker === 0xd9) continue
+    if (offset + 1 >= bytes.length) return null
+    const segmentLength = bytes[offset] << 8 | bytes[offset + 1]
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) return null
+    if (isJpegStartOfFrame(marker) && segmentLength >= 7) {
+      return {
+        height: bytes[offset + 3] << 8 | bytes[offset + 4],
+        width: bytes[offset + 5] << 8 | bytes[offset + 6],
+      }
+    }
+    offset += segmentLength
+  }
+  return null
+}
+
+function readWebpDimensions(bytes) {
+  if (bytes.length < 30 || !hasAscii(bytes, 0, 'RIFF') || !hasAscii(bytes, 8, 'WEBP')) return null
+  const chunkType = String.fromCharCode(...bytes.slice(12, 16))
+  if (chunkType === 'VP8X') {
+    return { width: 1 + readUint24LittleEndian(bytes, 24), height: 1 + readUint24LittleEndian(bytes, 27) }
+  }
+  if (chunkType === 'VP8L' && bytes[20] === 0x2f) {
+    return {
+      width: 1 + (bytes[21] | (bytes[22] & 0x3f) << 8),
+      height: 1 + ((bytes[22] & 0xc0) >> 6 | bytes[23] << 2 | (bytes[24] & 0x0f) << 10),
+    }
+  }
+  if (chunkType === 'VP8 ' && hasBytes(bytes, 23, [0x9d, 0x01, 0x2a])) {
+    return {
+      width: (bytes[26] | bytes[27] << 8) & 0x3fff,
+      height: (bytes[28] | bytes[29] << 8) & 0x3fff,
+    }
+  }
+  return null
+}
+
+function isJpegStartOfFrame(marker) {
+  return marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
+}
+
+function hasAscii(bytes, offset, value) {
+  return hasBytes(bytes, offset, [...value].map(character => character.charCodeAt(0)))
+}
+
+function hasBytes(bytes, offset, expected) {
+  return expected.every((value, index) => bytes[offset + index] === value)
+}
+
+function readUint32BigEndian(bytes, offset) {
+  return (bytes[offset] * 0x1000000) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3]
+}
+
+function readUint24LittleEndian(bytes, offset) {
+  return bytes[offset] | bytes[offset + 1] << 8 | bytes[offset + 2] << 16
+}
+
+function invalidImage(message) {
+  return { ok: false, code: 'invalid_image', message }
+}
+
+function logoTooLarge() {
+  return {
+    ok: false,
+    code: 'input_too_large',
+    message: `Logo exceeds the ${automationLimits.logoBytes} byte limit.`,
+  }
+}
+
+function getUtf8ByteLength(value) {
+  return Buffer.byteLength(value, 'utf8')
 }
 
 function uniqueId(value, ids) {
@@ -880,13 +1130,14 @@ async function main() {
   if (!['build', 'validate'].includes(command) || !inputPath || (command === 'build' && !outputPath)) {
     throw new Error('Usage: quotation-json.mjs build <partial.json> <quotation.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | validate <quotation.json> | self-test')
   }
-  const input = await readJsonFile(inputPath)
   if (command === 'validate') {
-    const result = validateQuotationEnvelope(input)
+    const content = await readFile(resolve(inputPath), 'utf8')
+    const result = validateQuotationJsonContent(content)
     printResult(result)
     if (result.errors.length > 0) process.exitCode = 1
     return
   }
+  const input = await readJsonFile(inputPath)
   const { envelope, warnings } = buildQuotationEnvelope(input)
   await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
   printResult({ errors: [], warnings })
@@ -938,6 +1189,13 @@ async function runSelfTest(outputPath) {
   }, new Date('2026-08-19T08:00:00.000Z'))
   if (migratedTemplate.envelope.quotation.templateId !== 'classic') {
     throw new Error('Legacy quotation template migration failed.')
+  }
+  const spreadsheetTemplate = buildQuotationEnvelope({
+    templateId: 'spreadsheet',
+    header: { currency: 'USD', documentLocale: 'en-US' },
+  }, new Date('2026-08-19T08:00:00.000Z'))
+  if (spreadsheetTemplate.envelope.quotation.templateId !== 'spreadsheet') {
+    throw new Error('Spreadsheet quotation template generation failed.')
   }
   if (envelope.quotation.majorItems[0].children.length !== 3) {
     throw new Error('Nested item generation failed.')

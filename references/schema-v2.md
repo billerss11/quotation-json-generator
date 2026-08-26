@@ -20,7 +20,7 @@ This is the maintained skill reference for the current app contract. The applica
 Required complete output fields:
 
 - `id`: unique non-empty string.
-- `templateId`: `classic`, `technical-bid`, `executive-summary`, `luminous`, `signal`, or `atelier`.
+- `templateId`: `classic`, `technical-bid`, `executive-summary`, `luminous`, `signal`, `atelier`, or `spreadsheet`.
 - `companyProfileId`: profile ID or `null`.
 - `companyProfileSnapshot`: `{ companyName, email, phone }` strings.
 - `header`: quotation metadata described below.
@@ -150,3 +150,11 @@ When the source is silent, the builder uses these editable defaults and reports 
 - classic template and green accent `#047857`.
 
 These are placeholders, not extracted facts.
+
+## Strict validation and limits
+
+Final files must not contain unknown fields outside the maintained schema. The bundled validator checks the complete generated structure without requiring the application. When a configured application is available, also run its `--automation validate` command because the application contract is authoritative.
+
+- Quotation JSON: at most 10 MB UTF-8.
+- Pending goods-receipt draft: at most 5 MB serialized UTF-8.
+- Logo: empty or a valid PNG, JPEG, GIF, or WebP base64 data URL. The declared MIME type must match the image bytes; decoded data must not exceed 5 MB; dimensions must not exceed 4096 x 4096 pixels.

@@ -35,6 +35,17 @@
         "Both PDFs are produced by the configured Quotation Software executable.",
         "The export result records exchangeRateDate and the exact applied exchangeRates."
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "Create an import-ready quotation using the spreadsheet template. If my quotation editor is already open, import it through the current programmatic API and validate it for quotation PDF export.",
+      "expected_output": "The generated schema-v2 JSON preserves templateId spreadsheet, passes offline validation, and uses quotationAgentV2 with export preflight when an open editor is available.",
+      "files": [],
+      "expectations": [
+        "The final JSON contains quotation.templateId set to spreadsheet rather than classic.",
+        "The bundled validator passes the final file.",
+        "Open-editor automation awaits quotationAgentReady and prefers quotationAgentV2 over UI simulation or the legacy API."
+      ]
     }
   ]
 }
