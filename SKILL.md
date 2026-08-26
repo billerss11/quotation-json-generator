@@ -1,100 +1,55 @@
 ---
 name: quotation-json-generator
-description: Generate or update import-ready Quotation Software schema-v2 JSON from natural language, images, PDFs, or extracted tables, including pending goods-receipt drafts and completed receipt history; optionally export quotation and goods-receipt PDFs through a user-configured portable Quotation Software executable. Use whenever the user asks to create, edit, import, automate, or render a quotation or goods receipt. JSON generation must work without the application. Do not use for unrelated JSON.
+description: Create or update import-ready Quotation Software schema-v2 JSON from prose, images, PDFs, or tables; prepare pending or completed goods receipts; and optionally export PDFs through a configured portable Quotation Software executable. Use for quotation or goods-receipt creation, editing, import, automation, validation, or rendering. Do not use for unrelated JSON.
 ---
 
 # Quotation JSON Generator
 
-Create a complete schema-v2 quotation file that the Quotation Software app can import. The JSON file is the primary, independent artifact: build and validate it whether or not Quotation Software is installed or configured. PDF export is an optional second step that must use the configured portable application.
+Create a complete schema-v2 quotation JSON that works independently of Quotation Software. PDF export and application validation are optional enhancements and must never block JSON generation.
 
-A prepared receipt that should open in **Generate GR** is stored as `quotation.pendingGoodsReceiptDraft`. Successfully exported receipts may be recorded in `quotation.goodsReceiptHistory`.
+## Load only what the request needs
 
-## First-run software setup
+- Images, scans, PDFs, or copied tables: read [references/extraction-guide.md](references/extraction-guide.md).
+- Nested groups, manual prices, multiple currencies, taxes, extra charges, section headers, or unfamiliar fields: read [references/schema-v2.md](references/schema-v2.md).
+- Pending or completed goods receipts: read [references/goods-receipt.md](references/goods-receipt.md).
+- PDF export, portable-app setup, or application validation: read [references/software-pdf.md](references/software-pdf.md).
+- Matching or auditing document-affecting GUI settings: read [references/gui-parity.md](references/gui-parity.md).
+- Direct work in an already open editor: read [references/agent-api-v2.md](references/agent-api-v2.md).
 
-At the start of an invocation, run:
-
-```powershell
-node <skill-folder>\scripts\quotation-software.mjs status
-```
-
-If `setupAcknowledged` is `false`, ask the user for the full portable Quotation Software `.exe` path, or let them say they do not have it. Treat this as non-blocking setup: continue generating the requested JSON while waiting for the answer. Configure or remember the answer using [references/software-pdf.md](references/software-pdf.md).
-
-Never store the executable path inside quotation JSON. A missing, moved, or unconfigured executable disables only PDF export; it never disables or delays JSON generation.
-
-## Choose a mode
-
-- **Quotation mode:** build a quotation from source material.
-- **Pending goods-receipt mode:** prepare the receipt that the GUI should load after import. Use this when the user supplies quotation and goods-receipt information together.
-- **Goods-receipt history mode:** add an already completed/exported receipt record.
-- **PDF delivery:** after the JSON is valid, ask the configured application to export the quotation PDF, goods-receipt PDF, or both.
-- **Open-editor automation:** adjust the active quotation through the versioned renderer API instead of simulating UI actions.
-
-Read [references/goods-receipt.md](references/goods-receipt.md) before either goods-receipt mode. Do not use history mode merely to prefill the GUI.
-Read [references/software-pdf.md](references/software-pdf.md) whenever PDF is requested. Read [references/gui-parity.md](references/gui-parity.md) when composing or reviewing a complete quotation so every document-affecting GUI choice is represented.
-Read [references/agent-api-v2.md](references/agent-api-v2.md) when importing, adjusting, validating, or exporting through an already open quotation editor.
+Receipt modes are distinct: use `quotation.pendingGoodsReceiptDraft` for a receipt the user will edit or export through **Generate GR**; use `quotation.goodsReceiptHistory` only for an already completed/exported receipt or an explicitly requested archival record.
 
 ## Workflow
 
-1. Inspect every supplied source. For PDFs or images, read [references/extraction-guide.md](references/extraction-guide.md) before extracting.
-2. Convert the evidence into a partial quotation object. Keep hierarchy, quantities, units, currencies, pricing meaning, markup, and tax assignments separate.
-3. Read [references/schema-v2.md](references/schema-v2.md) whenever the request includes nested groups, manual selling prices, multiple currencies, taxes, extra charges, or section headers.
-4. Do not invent commercial facts. If missing information can be safely left editable, use the helper defaults and disclose the default. Ask only when an ambiguity would materially change the quotation total or structure.
-5. Save the partial object as UTF-8 JSON, then build the final file:
+1. Inspect every supplied source. Extract evidence into a partial quotation object while keeping hierarchy, quantities, units, currencies, pricing meaning, markup, and tax assignments separate.
+2. Do not invent commercial facts. Use builder defaults only when the missing value can remain editable, and disclose those defaults. Ask when ambiguity would materially change totals or structure.
+3. Save the partial object as UTF-8 JSON, then build and validate:
 
    ```powershell
    node <skill-folder>\scripts\quotation-json.mjs build <partial.json> <quotation.json>
    node <skill-folder>\scripts\quotation-json.mjs validate <quotation.json>
    ```
 
-6. To prepare a receipt for the GUI, save the receipt fields as a second UTF-8 JSON file and set the pending draft in the same quotation JSON:
+4. For receipt work, follow `goods-receipt.md` and run the appropriate helper command. Validate the resulting complete quotation again.
+5. Fix every validation error. Resolve builder warnings where possible; otherwise disclose them separately. Keep extraction notes, confidence, defaults, and assumptions outside the quotation JSON.
+6. When application validation or PDF output is relevant, follow `software-pdf.md`. Offline validation comes first. If the executable is missing or incompatible, still deliver the validated JSON.
+7. Return a clickable link to the final JSON. Export requested PDFs only after validation succeeds, and verify each output exists before reporting success.
 
-   ```powershell
-   node <skill-folder>\scripts\quotation-json.mjs set-goods-receipt-draft <quotation.json> <receipt.json> <quotation-with-receipt.json>
-   node <skill-folder>\scripts\quotation-json.mjs validate <quotation-with-receipt.json>
-   ```
+## Non-negotiable rules
 
-7. Use history mode only for a receipt that is already completed/exported:
-
-   ```powershell
-   node <skill-folder>\scripts\quotation-json.mjs add-goods-receipt <quotation.json> <receipt.json> <quotation-with-receipt.json>
-   node <skill-folder>\scripts\quotation-json.mjs validate <quotation-with-receipt.json>
-   ```
-
-8. Fix every local validation error. Review warnings and report unresolved assumptions separately; do not add extraction notes or confidence metadata to the quotation JSON.
-9. If the portable application is configured and usable, also run its authoritative V2 validation before delivery:
-
-   ```powershell
-   node <skill-folder>\scripts\quotation-software.mjs validate <quotation.json> --no-network --result-json <validation-result.json>
-   ```
-
-   Application validation strengthens the offline check; it never makes software setup a prerequisite for JSON generation.
-10. Return a clickable link to the generated JSON even when application validation or PDF export is unavailable.
-11. When PDF is requested, export only after validation succeeds. Use `scripts/quotation-software.mjs render`; do not simulate clicks or recreate the PDF in another tool. Verify each requested output exists before reporting success.
-12. If the quotation editor is already open and the user asks for direct import or adjustment, await `window.quotationAgentReady` and prefer `window.quotationAgentV2`. Use `window.quotationAgent` only as a compatibility fallback.
-
-## Required behavior
-
-- Generate schema version 2, even when an example uses legacy version 1.
-- JSON creation and validation must not depend on the software path, application availability, or PDF success.
-- Respect the shared automation limits: 10 MB quotation JSON, 5 MB serialized pending goods receipt, and a valid PNG/JPEG/GIF/WebP logo no larger than 5 MB or 4096 x 4096 pixels.
-- Compose the final JSON state for document-affecting GUI controls. Do not require a separate CLI mutation when the same state belongs in schema-v2 JSON.
+- Always generate schema version 2, even when examples or inputs use version 1.
+- JSON creation and offline validation must not depend on an executable path, application availability, network access, or PDF success. Never store the executable path in quotation JSON.
+- Validate the final file with the bundled helper. When the configured application is used, treat its V2 structured validation issues as authoritative.
 - Preserve source wording and row order unless the user asks for cleanup.
-- Keep quotation hierarchy to at most three item levels. Section headers are root-only.
-- Use unique IDs. The helper creates UUIDs when IDs are absent or duplicated.
-- Treat `manualUnitPrice` as the selling price only when the source clearly gives a unit selling price. Divide a line total by quantity only when that meaning is explicit.
-- Never use `expectedTotal` as a substitute for a price. It only records an expected group total for mismatch checking.
-- Never guess exchange rates. A non-base item currency requires an explicit rate in quotation direction.
-- Missing monetary values default to zero and must be disclosed. Zero is an editable placeholder, not an inferred price.
-- Do not silently repair supplied currencies or discard malformed exchange rates or extra charges. Resolve every builder warning before delivery, or disclose it to the user.
-- Map customer PO numbers to `customerReference`, delivery or dispatch document numbers to `deliveryReference`, delivery destination text to `deliveryAddress`, and general receipt notes to `remarks`. Do not put these values in the quotation header.
-- Derive goods-receipt lines and quoted quantities from the quotation. The default `detailed` selection uses positive-quantity leaf lines, matching the app; disclose this default when the user did not state which items or quantities were received.
-- For explicit receipt inclusion/exclusion, set matching line overrides to `selected: true` or `selected: false`. Use received `quantity` and line `remarks` only when supplied or clearly implied.
-- When the user wants to import the JSON and then edit/export the receipt in the GUI, generate `pendingGoodsReceiptDraft`, not a history record.
-- Preserve a real exported PDF path in the history record's `filePath` when supplied. An empty path is allowed with a warning, but it does not prove that the receipt was exported.
-- A successful direct PDF export clears `pendingGoodsReceiptDraft` and adds the completed snapshot to `goodsReceiptHistory`. Browser Print leaves the pending draft unchanged.
-- Headless PDF export uses temporary application storage and does not rewrite the input JSON. Keep the original JSON deliverable; add a completed receipt history record explicitly when the user requests that archival state.
-- Use the configured application for every quotation or goods-receipt PDF. If it is unavailable, deliver JSON and state that PDF is pending rather than substituting another renderer.
-- Validate the final file with the bundled helper before delivery.
-- When the configured application is available, treat its V2 validation result and structured issue paths as authoritative.
+- Keep quotation item hierarchy to three levels maximum. Section headers are root-only.
+- Use unique IDs; the builder creates fresh UUIDs for missing or duplicated IDs.
+- Compose final JSON values for document-affecting GUI controls. Do not require a separate CLI mutation for state that belongs in schema-v2 JSON.
+- Treat `manualUnitPrice` as a unit selling price only when the evidence clearly says so. Divide a line total by quantity only when its meaning and a nonzero quantity are explicit.
+- `expectedTotal` is only a group mismatch check; it never supplies or changes a price.
+- Never guess exchange rates. Each non-base item currency needs an explicit rate in quotation direction: `1 item currency = rate base currency`.
+- Missing monetary values may default to zero only as disclosed, editable placeholders—not inferred prices.
+- Do not silently repair currencies, malformed rates, charges, or other supplied commercial data. Resolve or disclose every warning.
+- Derive goods-receipt lines and quoted quantities from the quotation. If the user does not specify receipt selection, use the app-matching `detailed` default of positive-quantity leaf lines and disclose it.
+- Use the configured Quotation Software for quotation and goods-receipt PDFs. If unavailable, report the PDF as pending; do not substitute another renderer.
+- Enforce the shared limits: quotation JSON at most 10 MB; serialized pending receipt at most 5 MB; logo must be PNG/JPEG/GIF/WebP, at most 5 MB and 4096 x 4096 pixels.
 
 Use [assets/quotation-v2-template.json](assets/quotation-v2-template.json) only as a manual starting point. Prefer the builder because it creates fresh IDs and timestamps.
