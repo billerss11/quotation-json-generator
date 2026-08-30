@@ -30,6 +30,7 @@ export const automationLimits = {
 const allowedEnvelopeFields = new Set(['schemaVersion', 'app', 'exportedAt', 'quotation'])
 const allowedQuotationFields = new Set([
   'id', 'templateId', 'companyProfileId', 'companyProfileSnapshot', 'header', 'majorItems',
+  // Accepted only so older app exports can still be validated and updated.
   'lineItemEntryMode', 'outputSettings', 'totalsConfig', 'exchangeRates', 'branding', 'metadata',
   'pendingGoodsReceiptDraft', 'goodsReceiptHistory',
 ])
@@ -123,7 +124,6 @@ export function buildQuotationEnvelope(input, now = new Date()) {
       terms: text(headerSource.terms),
     },
     majorItems,
-    lineItemEntryMode: source.lineItemEntryMode === 'quick' ? 'quick' : 'detailed',
     outputSettings: {
       itemDetailLevel: [1, 2, 3].includes(source.outputSettings?.itemDetailLevel)
         ? source.outputSettings.itemDetailLevel
@@ -190,8 +190,8 @@ export function validateQuotationEnvelope(value) {
   }
   validateCompanyProfile(quotation.companyProfileSnapshot, errors)
   validateHeader(quotation.header, errors)
-  if (!['detailed', 'quick'].includes(quotation.lineItemEntryMode)) {
-    errors.push('lineItemEntryMode must be detailed or quick.')
+  if (quotation.lineItemEntryMode !== undefined && !['detailed', 'quick'].includes(quotation.lineItemEntryMode)) {
+    errors.push('Legacy lineItemEntryMode must be detailed or quick when present.')
   }
   if (![1, 2, 3].includes(quotation.outputSettings?.itemDetailLevel)) {
     errors.push('outputSettings.itemDetailLevel must be 1, 2, or 3.')
@@ -1180,6 +1180,18 @@ async function runSelfTest(outputPath) {
   }, new Date('2026-08-19T08:00:00.000Z'))
   const result = validateQuotationEnvelope(envelope)
   if (result.errors.length > 0) throw new Error(result.errors.join('\n'))
+  if ('lineItemEntryMode' in envelope.quotation) {
+    throw new Error('Removed line-item entry mode was generated.')
+  }
+  const legacyEntryMode = structuredClone(envelope)
+  legacyEntryMode.quotation.lineItemEntryMode = 'quick'
+  if (validateQuotationEnvelope(legacyEntryMode).errors.length > 0) {
+    throw new Error('Legacy line-item entry mode compatibility failed.')
+  }
+  legacyEntryMode.quotation.lineItemEntryMode = 'fast'
+  if (!validateQuotationEnvelope(legacyEntryMode).errors.some((error) => error.includes('Legacy lineItemEntryMode'))) {
+    throw new Error('Invalid legacy line-item entry mode validation failed.')
+  }
   if (envelope.quotation.templateId !== 'classic') {
     throw new Error('Default quotation template generation failed.')
   }

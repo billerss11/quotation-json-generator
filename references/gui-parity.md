@@ -11,7 +11,6 @@ The automation contract is the complete schema-v2 quotation state, not a command
 | Customer and contact | `quotation.header.customerCompany`, `contactPerson`, `contactDetails` | Preserve distinct company/person/contact meanings. |
 | Project and commercial text | `quotation.header.projectName`, `validityPeriod`, `notes`, `terms` | Keep receipt-only delivery data out of these fields. |
 | Currency and language | `quotation.header.currency`, `documentLocale` | Locale is `en-US` or `zh-CN`; base exchange rate is `1`. |
-| Entry workflow | `quotation.lineItemEntryMode` | `detailed` for cost-plus entry or `quick` for selling-price entry. |
 | Sections and item hierarchy | `quotation.majorItems` | Root section headers plus item trees up to three item levels. |
 | Item descriptions and quantities | Item `name`, `description`, `quantity`, `quantityUnit`, `notes` | Preserve order and wording from evidence. |
 | Item pricing | Item `pricingMethod`, `unitCost`, `costCurrency`, `manualUnitPrice`, `markupRate` | A manual price is a selling price; cost-plus uses cost and effective markup. |

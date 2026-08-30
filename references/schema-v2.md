@@ -25,7 +25,6 @@ Required complete output fields:
 - `companyProfileSnapshot`: `{ companyName, email, phone }` strings.
 - `header`: quotation metadata described below.
 - `majorItems`: ordered root rows.
-- `lineItemEntryMode`: `detailed` or `quick`.
 - `outputSettings.itemDetailLevel`: `1`, `2`, or `3`.
 - `totalsConfig`: markup, charges, and tax configuration.
 - `exchangeRates`: currency-to-base rate table.
@@ -146,7 +145,7 @@ When the source is silent, the builder uses these editable defaults and reports 
 - quantity `1` and unit `EA`;
 - monetary values and global markup `0`;
 - one `0%` tax class;
-- detailed entry mode and output detail level `3`;
+- output detail level `3`;
 - classic template and green accent `#047857`.
 
 These are placeholders, not extracted facts.
