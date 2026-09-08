@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 2,
+  "app": "quotation-software",
+  "exportedAt": "2026-09-08T08:00:00.000Z",
+  "quotation": {
+    "id": "evaluation-quote",
+    "templateId": "spreadsheet",
+    "companyProfileId": null,
+    "companyProfileSnapshot": {
+      "companyName": "Evaluation Supplier",
+      "email": "sales@example.com",
+      "phone": "+1 555 0100"
+    },
+    "header": {
+      "quotationNumber": "Q-EVAL-003",
+      "revisionNumber": 1,
+      "quotationDate": "2026-09-08",
+      "customerCompany": "Evaluation Customer",
+      "contactPerson": "Test Buyer",
+      "contactDetails": "buyer@example.com",
+      "projectName": "Synthetic pump package",
+      "validityPeriod": "30 days",
+      "currency": "USD",
+      "documentLocale": "en-US",
+      "notes": "Evaluation fixture only.",
+      "terms": ""
+    },
+    "majorItems": [
+      {
+        "id": "package",
+        "name": "Pump package",
+        "description": "",
+        "quantity": 2,
+        "quantityUnit": "SET",
+        "pricingMethod": "cost_plus",
+        "unitCost": 0,
+        "costCurrency": "USD",
+        "notes": "",
+        "children": [
+          {
+            "id": "pump",
+            "name": "PX-100 pump",
+            "description": "",
+            "quantity": 1,
+            "quantityUnit": "EA",
+            "pricingMethod": "cost_plus",
+            "unitCost": 100,
+            "costCurrency": "USD",
+            "notes": "",
+            "children": []
+          },
+          {
+            "id": "seal",
+            "name": "Seal",
+            "description": "",
+            "quantity": 3,
+            "quantityUnit": "EA",
+            "pricingMethod": "cost_plus",
+            "unitCost": 20,
+            "costCurrency": "EUR",
+            "notes": "",
+            "children": []
+          }
+        ]
+      }
+    ],
+    "outputSettings": {
+      "itemDetailLevel": 3
+    },
+    "totalsConfig": {
+      "globalMarkupRate": 10,
+      "extraCharges": [
+        {
+          "id": "freight",
+          "label": "Freight",
+          "amount": 25
+        }
+      ],
+      "taxMode": "single",
+      "taxClasses": [
+        {
+          "id": "tax-standard",
+          "label": "13%",
+          "rate": 13
+        }
+      ],
+      "defaultTaxClassId": "tax-standard",
+      "mixedTaxColumns": [
+        "taxRate",
+        "unitPrice",
+        "unitPriceWithTax",
+        "netAmount",
+        "grossAmount"
+      ]
+    },
+    "exchangeRates": {
+      "USD": 1,
+      "EUR": 1.08
+    },
+    "branding": {
+      "logoDataUrl": "",
+      "accentColor": "#047857"
+    },
+    "metadata": {
+      "createdAt": "2026-09-08T08:00:00.000Z",
+      "updatedAt": "2026-09-08T08:00:00.000Z"
+    },
+    "goodsReceiptHistory": [],
+    "pendingGoodsReceiptDraft": {
+      "quotationId": "evaluation-quote",
+      "quotationNumber": "Q-EVAL-003",
+      "quotationDate": "2026-09-08",
+      "grNumber": "GR-EVAL-003",
+      "documentDate": "2026-09-08",
+      "customerReference": "PO-EVAL-003",
+      "deliveryReference": "",
+      "receivingCompany": "Evaluation Customer",
+      "deliveryAddress": "Evaluation warehouse",
+      "deliveryContact": "Test Buyer",
+      "contactDetails": "buyer@example.com",
+      "supplierCompany": "Evaluation Supplier",
+      "supplierContact": "sales@example.com | +1 555 0100",
+      "projectName": "Synthetic pump package",
+      "preparedBy": "",
+      "remarks": "",
+      "templateId": "compact",
+      "lines": [
+        {
+          "id": "package",
+          "sourceItemId": "package",
+          "sourceItemNumber": "1",
+          "sourceGroupPath": [],
+          "sourceDepth": 0,
+          "sourceHasChildren": true,
+          "selected": false,
+          "description": "Pump package",
+          "quotedDescription": "Pump package",
+          "quantity": 2,
+          "quotedQuantity": 2,
+          "unit": "SET",
+          "quotedUnit": "SET",
+          "remarks": ""
+        },
+        {
+          "id": "pump",
+          "sourceItemId": "pump",
+          "sourceItemNumber": "1.1",
+          "sourceGroupPath": [
+            {
+              "id": "package",
+              "itemNumber": "1",
+              "label": "Pump package",
+              "depth": 0
+            }
+          ],
+          "sourceDepth": 1,
+          "sourceHasChildren": false,
+          "selected": true,
+          "description": "PX-100 pump",
+          "quotedDescription": "PX-100 pump",
+          "quantity": 2,
+          "quotedQuantity": 2,
+          "unit": "EA",
+          "quotedUnit": "EA",
+          "remarks": ""
+        },
+        {
+          "id": "seal",
+          "sourceItemId": "seal",
+          "sourceItemNumber": "1.2",
+          "sourceGroupPath": [
+            {
+              "id": "package",
+              "itemNumber": "1",
+              "label": "Pump package",
+              "depth": 0
+            }
+          ],
+          "sourceDepth": 1,
+          "sourceHasChildren": false,
+          "selected": true,
+          "description": "Seal",
+          "quotedDescription": "Seal",
+          "quantity": 6,
+          "quotedQuantity": 6,
+          "unit": "EA",
+          "quotedUnit": "EA",
+          "remarks": ""
+        }
+      ]
+    }
+  }
+}

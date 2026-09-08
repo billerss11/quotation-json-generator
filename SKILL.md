@@ -53,3 +53,17 @@ Receipt modes are distinct: use `quotation.pendingGoodsReceiptDraft` for a recei
 - Enforce the shared limits: quotation JSON at most 10 MB; serialized pending receipt at most 5 MB; logo must be PNG/JPEG/GIF/WebP, at most 5 MB and 4096 x 4096 pixels.
 
 Use [assets/quotation-v2-template.json](assets/quotation-v2-template.json) only as a manual starting point. Prefer the builder because it creates fresh IDs and timestamps.
+
+## Maintenance checks
+
+Calculation and import behavior last verified on 2026-09-08 against repository commit `22836825285f786dd32402ca4d78bdaa2a095cef`. The offline helper remains independent of the repository and executable. An API version of 2 alone does not identify which calculation fixes a packaged executable contains.
+
+When changing the helper or syncing repository behavior, run:
+
+```powershell
+node --test <skill-folder>\scripts\quotation-json.test.mjs <skill-folder>\scripts\quotation-software.test.mjs
+node <skill-folder>\scripts\quotation-json.mjs self-test
+node <skill-folder>\scripts\verify-repo-parity.mjs <quotation-software-repo>
+```
+
+The optional parity check uses the checkout's existing Vite installation, compares actual import/calculation results, and prints the verified commit. Do not make it a prerequisite for ordinary JSON generation. Evaluation file paths in `evals/evals.json` are relative to the skill folder; fixtures are bundled under `evals/fixtures/`.

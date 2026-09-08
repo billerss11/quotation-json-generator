@@ -93,7 +93,7 @@ export function buildQuotationEnvelope(input, now = new Date()) {
   )
 
   const totalsSource = isRecord(source.totalsConfig) ? source.totalsConfig : {}
-  const taxClasses = buildTaxClasses(totalsSource.taxClasses, warnings)
+  const taxClasses = buildTaxClasses(totalsSource.taxClasses, warnings, totalsSource.taxRate)
   const taxClassIds = new Set(taxClasses.map((taxClass) => taxClass.id))
   const requestedDefaultTaxClassId = text(totalsSource.defaultTaxClassId).trim()
   const defaultTaxClassId = taxClassIds.has(requestedDefaultTaxClassId)
@@ -332,6 +332,53 @@ export function addGoodsReceiptToEnvelope(value, input, now = new Date()) {
   }
 
   return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
+}
+
+export function summarizeQuotationEnvelope(value) {
+  const validation = validateQuotationEnvelope(value)
+  if (validation.errors.length > 0) {
+    throw new Error(`Cannot summarize an invalid quotation:\n- ${validation.errors.join('\n- ')}`)
+  }
+
+  const quotation = value.quotation
+  const exchangeRates = Object.fromEntries(Object.entries(quotation.exchangeRates)
+    .map(([currency, rate]) => [normalizeCurrency(currency), rate]))
+  const items = quotation.majorItems.filter((item) => item.kind !== 'section_header')
+  const summaries = items.map((item) => ({
+    baseSubtotal: calculateQuotationItemBaseSubtotal(item, exchangeRates),
+    markupAmount: calculateQuotationItemMarkupAmount(
+      item,
+      quotation.totalsConfig.globalMarkupRate,
+      exchangeRates,
+    ),
+    subtotal: calculateQuotationItemSellingAmount(
+      item,
+      quotation.totalsConfig.globalMarkupRate,
+      exchangeRates,
+    ),
+  }))
+  const baseSubtotal = roundMoney(sumAmounts(summaries.map((summary) => summary.baseSubtotal)))
+  const markupAmount = roundMoney(sumAmounts(summaries.map((summary) => summary.markupAmount)))
+  const subtotalAfterMarkup = roundMoney(sumAmounts(summaries.map((summary) => summary.subtotal)))
+  const taxBuckets = calculateTaxBuckets(items, quotation.totalsConfig, exchangeRates)
+  const taxableSubtotal = roundMoney(sumAmounts(taxBuckets.map((bucket) => bucket.taxableSubtotal)))
+  const taxAmount = roundMoney(sumAmounts(taxBuckets.map((bucket) => bucket.taxAmount)))
+  const extraChargesTotal = roundMoney(sumAmounts(
+    quotation.totalsConfig.extraCharges.map((charge) => roundMoney(toPositiveNumber(charge.amount))),
+  ))
+
+  return {
+    quotationNumber: quotation.header.quotationNumber,
+    currency: normalizeCurrency(quotation.header.currency),
+    baseSubtotal,
+    markupAmount,
+    subtotalAfterMarkup,
+    taxableSubtotal,
+    taxAmount,
+    extraChargesTotal,
+    grandTotal: roundMoney(taxableSubtotal + taxAmount + extraChargesTotal),
+    taxBuckets,
+  }
 }
 
 export function buildGoodsReceiptDraft(quotation, input, warnings = [], timestamp = new Date().toISOString()) {
@@ -659,9 +706,9 @@ function buildItem(raw, path, baseCurrency, ids, warnings) {
     buildItem(child, `${path}.children[${index}]`, baseCurrency, ids, warnings),
   )
   const name = text(raw.name || raw.title)
-  const pricingMethod = raw.pricingMethod === 'manual_price' || finiteNumber(raw.manualUnitPrice)
-    ? 'manual_price'
-    : 'cost_plus'
+  const pricingMethod = raw.pricingMethod === 'manual_price' || raw.pricingMethod === 'cost_plus'
+    ? raw.pricingMethod
+    : finiteNumber(raw.manualUnitPrice) ? 'manual_price' : 'cost_plus'
   const hasCostCurrency = Object.prototype.hasOwnProperty.call(raw, 'costCurrency')
   const costCurrency = normalizeCurrency(raw.costCurrency)
   if (!name) warnings.push(`${path}: item name was missing.`)
@@ -690,6 +737,7 @@ function buildItem(raw, path, baseCurrency, ids, warnings) {
     notes: text(raw.notes),
     children,
   }
+  if (children.length === 0 && finiteNumber(raw.manualUnitPrice)) item.manualUnitPrice = raw.manualUnitPrice
   if (children.length === 0 && pricingMethod === 'manual_price') {
     item.manualUnitPrice = finiteNumber(raw.manualUnitPrice) ? raw.manualUnitPrice : 0
     if (!finiteNumber(raw.manualUnitPrice)) warnings.push(`${path}: manual unit price was missing or invalid; used 0.`)
@@ -752,8 +800,15 @@ function validateItem(item, path, depth, ids, currencies, taxIds, errors, warnin
   )
 }
 
-function buildTaxClasses(raw, warnings) {
+function buildTaxClasses(raw, warnings, legacyRate) {
+  if (legacyRate !== undefined && (!finiteNonNegative(legacyRate) || legacyRate > maxTaxRate)) {
+    throw new Error(`totalsConfig.taxRate must be between 0 and ${maxTaxRate}.`)
+  }
   if (!Array.isArray(raw) || raw.length === 0) {
+    if (legacyRate !== undefined) {
+      warnings.push(`Legacy taxRate ${legacyRate}% was migrated to a tax class.`)
+      return [{ id: 'default-tax-class', label: `${legacyRate}%`, rate: legacyRate }]
+    }
     warnings.push('Tax configuration was missing; used one 0% tax class.')
     return [{ id: 'default-tax-class', label: '0%', rate: 0 }]
   }
@@ -856,16 +911,24 @@ function buildExtraCharges(value, warnings) {
     if (!finiteNumber(charge.amount)) {
       warnings.push(`Extra charge ${index + 1} amount was missing or invalid; used 0.`)
     }
+    if (finiteNumber(charge.amount) && charge.amount < 0) {
+      throw new Error(`Extra charge ${index + 1} amount must be non-negative.`)
+    }
+    const amount = finiteNumber(charge.amount) ? roundMoney(charge.amount) : 0
+    if (finiteNumber(charge.amount) && amount !== charge.amount) {
+      warnings.push(`Extra charge ${index + 1} amount was rounded from ${charge.amount} to ${amount}, matching application import.`)
+    }
     return [{
       id: uniqueId(charge.id, ids),
       label: text(charge.label),
-      amount: finiteNumber(charge.amount) ? charge.amount : 0,
+      amount,
     }]
   })
 }
 
 function buildExchangeRates(value, baseCurrency, warnings) {
   const rates = {}
+  const currencies = new Set()
   if (value !== undefined && !isRecord(value)) {
     warnings.push('Exchange rates were invalid and were ignored.')
   }
@@ -875,6 +938,8 @@ function buildExchangeRates(value, baseCurrency, warnings) {
       warnings.push(`Exchange rate entry ${rawCurrency} used an invalid or unsupported currency and was ignored.`)
       continue
     }
+    if (currencies.has(currency)) throw new Error(`Duplicate exchange-rate currency: ${currency}.`)
+    currencies.add(currency)
     if (!finiteNumber(rate) || rate < minExchangeRate || rate > maxExchangeRate) {
       warnings.push(`Exchange rate for ${currency} was invalid and was ignored.`)
       continue
@@ -891,14 +956,20 @@ function buildExchangeRates(value, baseCurrency, warnings) {
 
 function validateExchangeRates(value, baseCurrency, usedCurrencies, errors) {
   if (!isRecord(value)) return errors.push('exchangeRates must be an object.')
+  const normalizedRates = {}
   for (const [currency, rate] of Object.entries(value)) {
-    if (!normalizeCurrency(currency) || !finiteNumber(rate) || rate < minExchangeRate || rate > maxExchangeRate) {
+    const code = normalizeCurrency(currency)
+    if (!code || !finiteNumber(rate) || rate < minExchangeRate || rate > maxExchangeRate) {
       errors.push(`Invalid exchange rate for ${currency}.`)
     }
+    if (code) {
+      if (Object.hasOwn(normalizedRates, code)) errors.push(`Duplicate exchange-rate currency: ${code}.`)
+      normalizedRates[code] = rate
+    }
   }
-  if (value[baseCurrency] !== 1) errors.push(`Base currency ${baseCurrency} must have exchange rate 1.`)
+  if (normalizedRates[normalizeCurrency(baseCurrency)] !== 1) errors.push(`Base currency ${baseCurrency} must have exchange rate 1.`)
   for (const currency of usedCurrencies) {
-    if (!finiteNumber(value[currency]) || value[currency] < minExchangeRate) {
+    if (!finiteNumber(normalizedRates[currency]) || normalizedRates[currency] < minExchangeRate) {
       errors.push(`Missing exchange rate for item currency ${currency}.`)
     }
   }
@@ -1054,6 +1125,253 @@ function logoTooLarge() {
   }
 }
 
+function calculateQuotationItemBaseSubtotal(item, exchangeRates) {
+  if (item.children.length > 0) {
+    return roundMoney(
+      toPositiveNumber(item.quantity)
+        * sumAmounts(item.children.map((child) => calculateQuotationItemBaseSubtotal(child, exchangeRates))),
+    )
+  }
+
+  return calculateLineCost(item, exchangeRates)
+}
+
+function calculateQuotationItemSellingAmount(item, globalMarkupRate, exchangeRates, inheritedMarkupRate) {
+  const nextInheritedMarkupRate = getInheritedMarkupRate(item.markupRate, inheritedMarkupRate)
+
+  if (item.children.length > 0) {
+    return roundMoney(
+      toPositiveNumber(item.quantity)
+        * sumAmounts(item.children.map((child) => calculateQuotationItemSellingAmount(
+          child,
+          globalMarkupRate,
+          exchangeRates,
+          nextInheritedMarkupRate,
+        ))),
+    )
+  }
+
+  return calculateLineSellingAmount(
+    item,
+    getEffectiveMarkupRate(item.markupRate, nextInheritedMarkupRate ?? globalMarkupRate),
+    exchangeRates,
+  )
+}
+
+function calculateQuotationItemMarkupAmount(item, globalMarkupRate, exchangeRates, inheritedMarkupRate) {
+  const nextInheritedMarkupRate = getInheritedMarkupRate(item.markupRate, inheritedMarkupRate)
+
+  if (item.children.length > 0) {
+    if (!hasUncostedManualItem(item, exchangeRates)) {
+      return roundMoney(
+        calculateQuotationItemSellingAmount(item, globalMarkupRate, exchangeRates, inheritedMarkupRate)
+          - calculateQuotationItemBaseSubtotal(item, exchangeRates),
+      )
+    }
+
+    return roundMoney(
+      toPositiveNumber(item.quantity)
+        * sumAmounts(item.children.map((child) => calculateQuotationItemMarkupAmount(
+          child,
+          globalMarkupRate,
+          exchangeRates,
+          nextInheritedMarkupRate,
+        ))),
+    )
+  }
+
+  const lineCost = calculateLineCost(item, exchangeRates)
+  if (item.pricingMethod === 'manual_price' && lineCost <= 0) return 0
+
+  const markupAmount = roundMoney(
+    calculateLineSellingAmount(
+      item,
+      getEffectiveMarkupRate(item.markupRate, nextInheritedMarkupRate ?? globalMarkupRate),
+      exchangeRates,
+    ) - lineCost,
+  )
+  return item.pricingMethod === 'manual_price' ? markupAmount : Math.max(markupAmount, 0)
+}
+
+function calculateLineCost(item, exchangeRates) {
+  return roundMoney(toPositiveNumber(item.quantity) * convertUnitCost(item, exchangeRates))
+}
+
+function calculateLineSellingAmount(item, markupRate, exchangeRates) {
+  const unitSellingPrice = item.pricingMethod === 'manual_price'
+    ? roundMoney(toPositiveNumber(item.manualUnitPrice ?? 0))
+    : roundMoney(
+        convertUnitCost(item, exchangeRates)
+          + roundMoney(convertUnitCost(item, exchangeRates) * (toPositiveNumber(markupRate) / 100)),
+      )
+  return roundMoney(toPositiveNumber(item.quantity) * unitSellingPrice)
+}
+
+function convertUnitCost(item, exchangeRates) {
+  const rate = item.costCurrency ? exchangeRates[normalizeCurrency(item.costCurrency)] : 1
+  return toPositiveNumber(item.unitCost) * toPositiveNumber(rate)
+}
+
+function hasUncostedManualItem(item, exchangeRates) {
+  if (item.children.length > 0) {
+    return item.children.some((child) => hasUncostedManualItem(child, exchangeRates))
+  }
+  return item.pricingMethod === 'manual_price' && calculateLineCost(item, exchangeRates) <= 0
+}
+
+function getEffectiveMarkupRate(markupRate, fallbackMarkupRate) {
+  return finiteNumber(markupRate)
+    ? Math.min(Math.max(markupRate, 0), maxMarkupRate)
+    : Math.min(Math.max(fallbackMarkupRate, 0), maxMarkupRate)
+}
+
+function getInheritedMarkupRate(markupRate, inheritedMarkupRate) {
+  return finiteNumber(markupRate)
+    ? Math.min(Math.max(markupRate, 0), maxMarkupRate)
+    : inheritedMarkupRate
+}
+
+function calculateTaxBuckets(items, config, exchangeRates) {
+  const rows = items.flatMap((item) => collectTaxBucketSubtotalsFromItem(
+    item,
+    config,
+    exchangeRates,
+    { globalMarkupRate: config.globalMarkupRate },
+  ))
+
+  return mergeTaxBucketSubtotalRows(rows).map((bucket) => {
+    const taxableSubtotal = roundMoney(bucket.subtotalAfterMarkup)
+    return {
+      taxClassId: bucket.taxClassId,
+      label: bucket.label,
+      rate: bucket.rate,
+      taxableSubtotal,
+      taxAmount: roundMoney(taxableSubtotal * (bucket.rate / 100)),
+    }
+  })
+}
+
+function collectTaxBucketSubtotalsFromItem(item, config, exchangeRates, context) {
+  const nextInheritedMarkupRate = getInheritedMarkupRate(item.markupRate, context.inheritedMarkupRate)
+  const nextInheritedTaxClassId = item.taxClassId ?? context.inheritedTaxClassId
+
+  if (item.children.length > 0) {
+    const childBuckets = mergeTaxBucketSubtotalRows(item.children.flatMap((child) =>
+      collectTaxBucketSubtotalsFromItem(child, config, exchangeRates, {
+        inheritedMarkupRate: nextInheritedMarkupRate,
+        inheritedTaxClassId: nextInheritedTaxClassId,
+        globalMarkupRate: context.globalMarkupRate,
+      })))
+    const scaledBuckets = childBuckets.map((bucket) => ({
+      ...bucket,
+      subtotalAfterMarkup: roundMoney(bucket.subtotalAfterMarkup * toPositiveNumber(item.quantity)),
+    }))
+    return reconcileTaxBucketSubtotals(
+      scaledBuckets,
+      calculateQuotationItemSellingAmount(item, context.globalMarkupRate, exchangeRates, context.inheritedMarkupRate),
+    )
+  }
+
+  const taxClass = resolveTaxClass(config, item.taxClassId, context.inheritedTaxClassId)
+  return [{
+    taxClassId: taxClass.id,
+    label: taxClass.label,
+    rate: taxClass.rate,
+    subtotalAfterMarkup: calculateLineSellingAmount(
+      item,
+      getEffectiveMarkupRate(item.markupRate, nextInheritedMarkupRate ?? context.globalMarkupRate),
+      exchangeRates,
+    ),
+  }]
+}
+
+function resolveTaxClass(config, itemTaxClassId, inheritedTaxClassId) {
+  const ids = new Set(config.taxClasses.map((taxClass) => taxClass.id))
+  const resolvedId = ids.has(itemTaxClassId)
+    ? itemTaxClassId
+    : ids.has(inheritedTaxClassId) ? inheritedTaxClassId : config.defaultTaxClassId
+  return config.taxClasses.find((taxClass) => taxClass.id === resolvedId) ?? config.taxClasses[0]
+}
+
+function mergeTaxBucketSubtotalRows(rows) {
+  const buckets = new Map()
+  for (const row of rows) {
+    const existing = buckets.get(row.taxClassId)
+    if (existing) {
+      existing.subtotalAfterMarkup = roundMoney(existing.subtotalAfterMarkup + row.subtotalAfterMarkup)
+    } else {
+      buckets.set(row.taxClassId, { ...row })
+    }
+  }
+  return [...buckets.values()]
+}
+
+function reconcileTaxBucketSubtotals(rows, expectedSubtotal) {
+  let adjustment = roundMoney(
+    roundMoney(expectedSubtotal) - roundMoney(sumAmounts(rows.map((row) => row.subtotalAfterMarkup))),
+  )
+  if (rows.length === 0 || adjustment === 0) return rows
+
+  const adjustedRows = rows.map((row) => ({ ...row }))
+  if (adjustment > 0) {
+    let index = adjustedRows.length - 1
+    while (index > 0 && adjustedRows[index].subtotalAfterMarkup <= 0) index -= 1
+    adjustedRows[index].subtotalAfterMarkup = roundMoney(adjustedRows[index].subtotalAfterMarkup + adjustment)
+    return adjustedRows
+  }
+
+  for (let index = adjustedRows.length - 1; index >= 0 && adjustment < 0; index -= 1) {
+    const reduction = Math.min(adjustedRows[index].subtotalAfterMarkup, Math.abs(adjustment))
+    adjustedRows[index].subtotalAfterMarkup = roundMoney(adjustedRows[index].subtotalAfterMarkup - reduction)
+    adjustment = roundMoney(adjustment + reduction)
+  }
+  return adjustedRows
+}
+
+function sumAmounts(amounts) {
+  return amounts.reduce((total, amount) => total + amount, 0)
+}
+
+function toPositiveNumber(value) {
+  return Number.isFinite(value) ? Math.max(value, 0) : 0
+}
+
+function roundMoney(value) {
+  if (!Number.isFinite(value)) return 0
+  const sign = value < 0 ? -1 : 1
+  const absoluteValue = Math.abs(value)
+  const scale = 100
+  const scaledAbsoluteValue = absoluteValue * scale
+  const lowerScaledInteger = Math.floor(scaledAbsoluteValue)
+  const distanceToHalf = lowerScaledInteger + 0.5 - scaledAbsoluteValue
+  const floatingPointTolerance = Math.min(Number.EPSILON * Math.max(1, scaledAbsoluteValue) * 4, 1e-7)
+  // Match moneyMath.ts: scaled multiplication can restore an exact half-tie.
+  if (Number.isSafeInteger(lowerScaledInteger) && distanceToHalf >= 0 && distanceToHalf <= floatingPointTolerance) {
+    return sign * ((lowerScaledInteger + 1) / scale)
+  }
+
+  const valueText = String(absoluteValue)
+  const plainValue = /[eE]/.test(valueText) ? toPlainDecimalString(absoluteValue) : valueText
+  const [wholePart, fractionPart = ''] = plainValue.split('.')
+  const paddedFraction = fractionPart.padEnd(3, '0')
+  let scaledValue = BigInt(`${wholePart || '0'}${paddedFraction.slice(0, 2)}`.replace(/^0+(?=\d)/, '') || '0')
+  if (Number(paddedFraction[2] ?? '0') >= 5) scaledValue += 1n
+  const roundedDigits = String(scaledValue).padStart(3, '0')
+  return sign * Number(`${roundedDigits.slice(0, -2)}.${roundedDigits.slice(-2)}`)
+}
+
+function toPlainDecimalString(value) {
+  const [coefficient, exponentText] = String(value).toLowerCase().split('e')
+  const exponent = Number(exponentText)
+  if (!Number.isInteger(exponent)) return value.toFixed(3)
+  const [wholePart, fractionPart = ''] = coefficient.split('.')
+  const digits = `${wholePart}${fractionPart}`
+  const decimalIndex = wholePart.length + exponent
+  if (decimalIndex <= 0) return `0.${'0'.repeat(Math.abs(decimalIndex))}${digits}`
+  if (decimalIndex >= digits.length) return `${digits}${'0'.repeat(decimalIndex - digits.length)}`
+  return `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`
+}
+
 function getUtf8ByteLength(value) {
   return Buffer.byteLength(value, 'utf8')
 }
@@ -1127,14 +1445,19 @@ async function main() {
   }
 
   const [inputPath, outputPath] = args
-  if (!['build', 'validate'].includes(command) || !inputPath || (command === 'build' && !outputPath)) {
-    throw new Error('Usage: quotation-json.mjs build <partial.json> <quotation.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | validate <quotation.json> | self-test')
+  if (!['build', 'validate', 'summarize'].includes(command) || !inputPath || (command === 'build' && !outputPath)) {
+    throw new Error('Usage: quotation-json.mjs build <partial.json> <quotation.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | validate <quotation.json> | summarize <quotation.json> | self-test')
   }
   if (command === 'validate') {
     const content = await readFile(resolve(inputPath), 'utf8')
     const result = validateQuotationJsonContent(content)
     printResult(result)
     if (result.errors.length > 0) process.exitCode = 1
+    return
+  }
+  if (command === 'summarize') {
+    const summary = summarizeQuotationEnvelope(await readJsonFile(inputPath))
+    process.stdout.write(JSON.stringify(summary) + '\n')
     return
   }
   const input = await readJsonFile(inputPath)

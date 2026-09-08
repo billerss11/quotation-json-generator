@@ -20,7 +20,11 @@ Call `api.getApiInfo()` when capabilities matter. Path import/export and direct 
 4. Run `validateQuotation()` and then `validateForExport({ document: 'quotation' })` or `validateForExport({ document: 'goods_receipt' })` before exporting.
 5. Serialize or save the resulting state through `serializeQuotation()` or `saveQuotationToFile()` when the user needs updated JSON.
 
-Every V2 call returns a discriminated result. Check `result.ok`; report structured error/issue codes and field paths instead of reducing them to an untraceable message.
+Most V2 operations return a discriminated result. Check the outer `result.ok` first; `getApiInfo()` and `waitUntilReady()` instead return API information directly. Successful validation calls still require checking `result.data.valid`. Successful goal-seek calls still require checking the nested `result.data.ok` before claiming a solved price or applying its markup.
+
+Item goal seek may return `data.ok: false` with `reason: 'target_unreachable'` when cent rounding and four-decimal markup precision cannot reproduce the target. Quotation goal seek can report the closest amount/rate; do not describe that diagnostic as an exact solution. Both item and quotation successful solves use canonical prices, including mixed-tax rounding for the selected quotation target. Report structured issue codes and field paths.
+
+The quotation currency's rate is locked to `1` inside `applyOperations` as well as individual FX calls. A batch that tries to change it fails with `base_currency_locked` before any following goal seek is applied. A currency rebase outside the supported rate range is rejected as a whole.
 
 ## Reusable libraries
 

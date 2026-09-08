@@ -28,7 +28,7 @@
       "prompt": "Using my configured quotation software, create quotation and goods-receipt PDFs from a complete bilingual-capable quotation JSON. Use the latest published exchange rates and give me the JSON, both PDFs, and the export result.",
       "expected_output": "The JSON validates independently, the configured portable app exports both PDFs with refresh enabled, and result JSON records the rate date and exact rates.",
       "files": [
-        "C:\\Users\\admin\\.codex\\skills\\quotation-json-generator-workspace\\verification\\quotation-with-receipt.json"
+        "evals/fixtures/quotation-with-receipt.json"
       ],
       "expectations": [
         "The quotation JSON passes validation before PDF export starts.",
