@@ -2,7 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { spawn } from 'node:child_process'
@@ -12,6 +12,15 @@ import { validateQuotationJsonContent } from './quotation-json.mjs'
 
 const configSchemaVersion = 1
 const apiProbeTimeoutMs = 15_000
+
+export class QuotationSoftwareExecutionError extends Error {
+  constructor(message, exitCode, report = null) {
+    super(message)
+    this.name = 'QuotationSoftwareExecutionError'
+    this.exitCode = Number.isInteger(exitCode) ? exitCode : 1
+    this.report = report
+  }
+}
 
 export function getDefaultConfigPath() {
   const configRoot = process.env.APPDATA || process.env.XDG_CONFIG_HOME || join(homedir(), '.config')
@@ -155,6 +164,68 @@ export async function renderDocuments({
   })
 }
 
+export async function runAutomationBatch({
+  manifestFile,
+  resultJson,
+  progressJson,
+  cancelFile,
+  noNetwork = false,
+  force = false,
+  timeoutMs,
+  configPath = getDefaultConfigPath(),
+}) {
+  const resolvedManifestFile = resolve(manifestFile)
+  const resolvedResultJson = resultJson ? resolve(resultJson) : undefined
+  const effectiveResultJson = resolvedResultJson ?? createTemporaryReportPath('batch')
+  const resolvedProgressJson = progressJson ? resolve(progressJson) : undefined
+  const resolvedCancelFile = cancelFile ? resolve(cancelFile) : undefined
+  const status = await getSoftwareStatus(configPath)
+  if (!status.usable || !status.softwarePath) {
+    throw new Error(status.configured
+      ? `The configured Quotation Software executable is missing: ${status.softwarePath}`
+      : 'Quotation Software is not configured.')
+  }
+
+  for (const outputPath of [effectiveResultJson, resolvedProgressJson]) {
+    if (outputPath) await mkdir(dirname(outputPath), { recursive: true })
+  }
+  const apiInfo = await getSoftwareApiInfo(configPath, dirname(effectiveResultJson))
+  if (!Array.isArray(apiInfo.commands) || !apiInfo.commands.includes('batch')) {
+    throw new Error('The configured Quotation Software executable does not support automation batch jobs.')
+  }
+
+  const args = createBatchArguments({
+    manifestFile: resolvedManifestFile,
+    resultJson: effectiveResultJson,
+    progressJson: resolvedProgressJson,
+    cancelFile: resolvedCancelFile,
+    noNetwork,
+    force,
+    timeoutMs,
+  })
+
+  try {
+    const processResult = await runExecutable(status.softwarePath, args)
+    const report = await readJsonIfPresent(effectiveResultJson) ?? parseStdoutReport(processResult.stdout)
+    if (processResult.exitCode !== 0) {
+      throw new QuotationSoftwareExecutionError(
+        formatExecutionError(report, processResult),
+        processResult.exitCode,
+        report,
+      )
+    }
+    for (const outputPath of [resolvedResultJson, resolvedProgressJson]) {
+      if (outputPath && !(await isFile(outputPath))) {
+        throw new Error(`Quotation Software reported success but did not create: ${outputPath}`)
+      }
+    }
+
+    return { softwarePath: status.softwarePath, ...(report ?? { ok: true }) }
+  } finally {
+    if (!resolvedResultJson) await unlink(effectiveResultJson).catch(() => undefined)
+  }
+}
+
 async function runAutomationDocument({
   command,
   inputFile,
@@ -191,6 +262,7 @@ async function runAutomationDocument({
   const resolvedGoodsReceiptPdf = goodsReceiptPdf ? resolve(goodsReceiptPdf) : undefined
   const resolvedOutputJson = outputJson ? resolve(outputJson) : undefined
   const resolvedResultJson = resultJson ? resolve(resultJson) : undefined
+  const effectiveResultJson = resolvedResultJson ?? createTemporaryReportPath(command)
   const resolvedProgressJson = progressJson ? resolve(progressJson) : undefined
   const resolvedCancelFile = cancelFile ? resolve(cancelFile) : undefined
   const args = createAutomationArguments({
@@ -199,7 +271,7 @@ async function runAutomationDocument({
     quotationPdf: resolvedQuotationPdf,
     goodsReceiptPdf: resolvedGoodsReceiptPdf,
     outputJson: resolvedOutputJson,
-    resultJson: resolvedResultJson,
+    resultJson: effectiveResultJson,
     progressJson: resolvedProgressJson,
     cancelFile: resolvedCancelFile,
     refreshExchangeRates,
@@ -209,29 +281,37 @@ async function runAutomationDocument({
   })
 
   for (const outputPath of [
-    resolvedQuotationPdf, resolvedGoodsReceiptPdf, resolvedOutputJson, resolvedResultJson, resolvedProgressJson,
+    resolvedQuotationPdf, resolvedGoodsReceiptPdf, resolvedOutputJson, effectiveResultJson, resolvedProgressJson,
   ]) {
     if (outputPath) await mkdir(dirname(outputPath), { recursive: true })
   }
-  await getSoftwareApiInfo(configPath, dirname(resolvedResultJson ?? resolvedInputFile))
+  await getSoftwareApiInfo(configPath, dirname(effectiveResultJson))
 
-  const processResult = await runExecutable(status.softwarePath, args)
-  const report = resolvedResultJson ? await readJsonIfPresent(resolvedResultJson) : parseStdoutReport(processResult.stdout)
+  try {
+    const processResult = await runExecutable(status.softwarePath, args)
+    const report = await readJsonIfPresent(effectiveResultJson) ?? parseStdoutReport(processResult.stdout)
 
-  if (processResult.exitCode !== 0) {
-    throw new Error(formatExecutionError(report, processResult))
-  }
-  for (const outputPath of [
-    resolvedQuotationPdf, resolvedGoodsReceiptPdf, resolvedOutputJson, resolvedResultJson, resolvedProgressJson,
-  ]) {
-    if (outputPath && !(await isFile(outputPath))) {
-      throw new Error(`Quotation Software reported success but did not create: ${outputPath}`)
+    if (processResult.exitCode !== 0) {
+      throw new QuotationSoftwareExecutionError(
+        formatExecutionError(report, processResult),
+        processResult.exitCode,
+        report,
+      )
     }
-  }
+    for (const outputPath of [
+      resolvedQuotationPdf, resolvedGoodsReceiptPdf, resolvedOutputJson, resolvedResultJson, resolvedProgressJson,
+    ]) {
+      if (outputPath && !(await isFile(outputPath))) {
+        throw new Error(`Quotation Software reported success but did not create: ${outputPath}`)
+      }
+    }
 
-  return {
-    softwarePath: status.softwarePath,
-    ...(report ?? { ok: true }),
+    return {
+      softwarePath: status.softwarePath,
+      ...(report ?? { ok: true }),
+    }
+  } finally {
+    if (!resolvedResultJson) await unlink(effectiveResultJson).catch(() => undefined)
   }
 }
 
@@ -273,9 +353,41 @@ export function createAutomationArguments({
   ]
 }
 
+export function createBatchArguments({
+  manifestFile,
+  resultJson,
+  progressJson,
+  cancelFile,
+  noNetwork = false,
+  force = false,
+  timeoutMs,
+}) {
+  return [
+    '--automation', 'batch',
+    '--manifest', manifestFile,
+    ...(resultJson ? ['--result-json', resultJson] : []),
+    ...(progressJson ? ['--progress-json', progressJson] : []),
+    ...(cancelFile ? ['--cancel-file', cancelFile] : []),
+    ...(timeoutMs !== undefined ? ['--timeout-ms', String(timeoutMs)] : []),
+    ...(noNetwork ? ['--no-network'] : []),
+    ...(force ? ['--force'] : []),
+  ]
+}
+
+const usage = [
+  'Usage: quotation-software.mjs status | api-info | version | configure <quotation-software.exe> | skip-setup',
+  '       quotation-software.mjs validate|render <quotation.json> [automation options] [--compact]',
+  '       quotation-software.mjs batch <manifest.json> [automation options] [--compact]',
+].join('\n')
+
 async function main() {
   const { command, positional, options } = parseArguments(process.argv.slice(2))
   const configPath = options.config || getDefaultConfigPath()
+
+  if (['help', '--help', '-h'].includes(command)) {
+    process.stdout.write(`${usage}\n`)
+    return
+  }
 
   if (command === 'status') {
     printJson(await getSoftwareStatus(configPath))
@@ -294,12 +406,31 @@ async function main() {
     printJson(await getSoftwareApiInfo(configPath))
     return
   }
+  if (command === 'version') {
+    process.stdout.write(`${(await getSoftwareApiInfo(configPath)).appVersion}\n`)
+    return
+  }
+  if (command === 'batch') {
+    if (!positional[0]) throw new Error('Usage: quotation-software.mjs batch <manifest.json> [automation options]')
+    const report = await runAutomationBatch({
+      manifestFile: positional[0],
+      resultJson: options.resultJson,
+      progressJson: options.progressJson,
+      cancelFile: options.cancelFile,
+      noNetwork: options.noNetwork === true,
+      force: options.force === true,
+      timeoutMs: options.timeoutMs,
+      configPath,
+    })
+    printJson(options.compact ? createCompactAutomationSummary(report) : report)
+    return
+  }
   if (['validate', 'render', 'export'].includes(command)) {
     if (!positional[0]) {
       throw new Error('Usage: quotation-software.mjs validate|render <quotation.json> [automation options]')
     }
     const operation = command === 'validate' ? validateDocument : renderDocuments
-    printJson(await operation({
+    const report = await operation({
       inputFile: positional[0],
       quotationPdf: options.quotationPdf,
       goodsReceiptPdf: options.goodsReceiptPdf,
@@ -312,11 +443,12 @@ async function main() {
       force: options.force === true,
       timeoutMs: options.timeoutMs,
       configPath,
-    }))
+    })
+    printJson(options.compact ? createCompactAutomationSummary(report) : report)
     return
   }
 
-  throw new Error('Usage: quotation-software.mjs status | api-info | configure <quotation-software.exe> | skip-setup | validate <quotation.json> | render <quotation.json> [options]')
+  throw new Error(usage)
 }
 
 function parseArguments(args) {
@@ -346,6 +478,10 @@ function parseArguments(args) {
     }
     if (argument === '--force' || argument === '--overwrite') {
       options.force = true
+      continue
+    }
+    if (argument === '--compact') {
+      options.compact = true
       continue
     }
     if (valueOptions.has(argument)) {
@@ -470,6 +606,46 @@ function parseStdoutReport(stdout) {
   return null
 }
 
+function createTemporaryReportPath(command) {
+  return join(tmpdir(), `quotation-software-${command}-${process.pid}-${randomUUID()}.json`)
+}
+
+export function createCompactAutomationSummary(report) {
+  const jobs = Array.isArray(report?.jobs) ? report.jobs : []
+  const errors = [
+    ...(Array.isArray(report?.errors) ? report.errors : []),
+    ...jobs.flatMap(job => Array.isArray(job?.errors) ? job.errors : []),
+  ]
+  const warnings = [
+    ...(Array.isArray(report?.warnings) ? report.warnings : []),
+    ...jobs.flatMap(job => Array.isArray(job?.warnings) ? job.warnings : []),
+  ]
+  const outputCount = (Array.isArray(report?.outputs) ? report.outputs.length : 0)
+    + jobs.reduce((count, job) => count + (Array.isArray(job?.outputs) ? job.outputs.length : 0), 0)
+  const firstError = errors[0]
+  const totals = report?.canonicalTotals ?? report?.totals
+  return {
+    ok: report?.ok !== false,
+    ...(report?.command ? { command: report.command } : {}),
+    ...(Number.isInteger(report?.exitCode) ? { exitCode: report.exitCode } : {}),
+    ...(report?.requestId ? { requestId: report.requestId } : {}),
+    errorCount: errors.length,
+    warningCount: warnings.length,
+    outputCount,
+    ...(report?.summary ? { summary: report.summary } : {}),
+    ...(report?.quotationNumber ? { quotationNumber: report.quotationNumber } : {}),
+    ...(report?.currency ? { currency: report.currency } : {}),
+    ...(totals?.grandTotal !== undefined ? { grandTotal: totals.grandTotal } : {}),
+    ...(firstError ? {
+      firstError: {
+        ...(firstError.code ? { code: firstError.code } : {}),
+        ...(firstError.message ? { message: firstError.message } : {}),
+        ...(firstError.fieldPath ? { fieldPath: firstError.fieldPath } : {}),
+      },
+    } : {}),
+  }
+}
+
 function formatExecutionError(report, processResult) {
   if (Array.isArray(report?.errors) && report.errors.length > 0) {
     return report.errors
@@ -497,6 +673,14 @@ function printJson(value) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch((error) => {
+    if (error instanceof QuotationSoftwareExecutionError) {
+      const output = process.argv.includes('--compact')
+        ? createCompactAutomationSummary(error.report ?? { ok: false, errors: [{ message: error.message }] })
+        : error.report ?? { ok: false, errors: [{ message: error.message }], exitCode: error.exitCode }
+      process.stderr.write(`${JSON.stringify(output)}\n`)
+      process.exitCode = error.exitCode
+      return
+    }
     process.stderr.write(`${error.message}\n`)
     process.exitCode = 1
   })

@@ -6,6 +6,7 @@ import { calculationCases, createCalculationInput } from './calculation-cases.mj
 import {
   automationLimits,
   buildQuotationEnvelope,
+  clearPendingGoodsReceiptDraftInEnvelope,
   setPendingGoodsReceiptDraftInEnvelope,
   summarizeQuotationEnvelope,
   validateQuotationEnvelope,
@@ -178,4 +179,17 @@ test('summarizes hierarchy, manual pricing, mixed tax, and extra charges', () =>
       { taxClassId: 'tax-0', label: 'Zero rated', rate: 0, taxableSubtotal: 50, taxAmount: 0 },
     ],
   })
+})
+
+test('clears a pending goods-receipt draft without changing history', () => {
+  const envelope = setPendingGoodsReceiptDraftInEnvelope(createEnvelope(), {
+    documentDate: '2026-08-26',
+    selectionPreset: 'detailed',
+  }, now).envelope
+  envelope.quotation.goodsReceiptHistory = []
+
+  const cleared = clearPendingGoodsReceiptDraftInEnvelope(envelope, new Date('2026-08-26T09:00:00.000Z')).envelope
+  assert.equal(cleared.quotation.pendingGoodsReceiptDraft, undefined)
+  assert.deepEqual(cleared.quotation.goodsReceiptHistory, [])
+  assert.equal(cleared.quotation.metadata.updatedAt, '2026-08-26T09:00:00.000Z')
 })

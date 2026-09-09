@@ -178,6 +178,12 @@ The builder defaults missing document date to today, GR number to `GR-YYYYMMDD`,
 
 For an already exported receipt, use `add-goods-receipt` with `{ exportedAt, filePath, draft }`. That command adds a completed history record and clears any pending draft, matching the application after successful direct PDF export.
 
+To discard only the pending draft while preserving completed history, run:
+
+```powershell
+node <skill-folder>\scripts\quotation-json.mjs clear-goods-receipt-draft <quotation.json> <output-quotation.json> --json
+```
+
 ## Validation
 
 The validator checks the complete quotation, pending goods-receipt draft, and every stored history record. It rejects unknown fields, drafts larger than 5 MB serialized UTF-8, malformed record metadata, dates, templates, line fields, hierarchy paths, negative quantities, duplicate IDs, and receipts with no selected positive-quantity lines. It warns when received quantity exceeds quoted quantity, a selected line has zero quantity, ancestor and descendant selections overlap, quotation identity differs from the current quotation, or a history record's `filePath` is empty.

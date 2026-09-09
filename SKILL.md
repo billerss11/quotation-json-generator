@@ -25,14 +25,16 @@ Receipt modes are distinct: use `quotation.pendingGoodsReceiptDraft` for a recei
 3. Save the partial object as UTF-8 JSON, then build and validate:
 
    ```powershell
-   node <skill-folder>\scripts\quotation-json.mjs build <partial.json> <quotation.json>
-   node <skill-folder>\scripts\quotation-json.mjs validate <quotation.json>
+   node <skill-folder>\scripts\quotation-json.mjs build <partial.json> <quotation.json> --json
+   node <skill-folder>\scripts\quotation-json.mjs validate <quotation.json> --json
    ```
 
 4. For receipt work, follow `goods-receipt.md` and run the appropriate helper command. Validate the resulting complete quotation again.
-5. Fix every validation error. Resolve builder warnings where possible; otherwise disclose them separately. Keep extraction notes, confidence, defaults, and assumptions outside the quotation JSON.
+5. Fix every validation error. Resolve builder warnings where possible; otherwise disclose them separately. When totals matter, run `quotation-json.mjs summarize <quotation.json>` instead of recalculating them in prose. Keep extraction notes, confidence, defaults, and assumptions outside the quotation JSON.
 6. When application validation or PDF output is relevant, follow `software-pdf.md`. Offline validation comes first. If the executable is missing or incompatible, still deliver the validated JSON.
 7. Return a clickable link to the final JSON. Export requested PDFs only after validation succeeds, and verify each output exists before reporting success.
+
+Keep command output compact: use `--json` for offline commands and `--compact` plus `--result-json` for application commands. Read the full result file only when the compact result reports errors, warnings, or details needed by the request.
 
 ## Non-negotiable rules
 

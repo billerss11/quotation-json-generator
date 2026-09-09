@@ -334,6 +334,28 @@ export function addGoodsReceiptToEnvelope(value, input, now = new Date()) {
   return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
 }
 
+export function clearPendingGoodsReceiptDraftInEnvelope(value, now = new Date()) {
+  if (!isRecord(value)) throw new Error('Quotation file must be a JSON object.')
+
+  const envelope = structuredClone(value)
+  const existing = validateQuotationEnvelope(envelope)
+  if (existing.errors.length > 0) {
+    throw new Error(`Cannot clear goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
+  }
+
+  delete envelope.quotation.pendingGoodsReceiptDraft
+  const timestamp = now.toISOString()
+  envelope.exportedAt = timestamp
+  envelope.quotation.metadata.updatedAt = timestamp
+
+  const result = validateQuotationEnvelope(envelope)
+  if (result.errors.length > 0) {
+    throw new Error(`Cannot clear goods-receipt draft:\n- ${result.errors.join('\n- ')}`)
+  }
+
+  return { envelope, warnings: [...new Set([...existing.warnings, ...result.warnings])] }
+}
+
 export function summarizeQuotationEnvelope(value) {
   const validation = validateQuotationEnvelope(value)
   if (validation.errors.length > 0) {
@@ -1414,8 +1436,16 @@ function nonEmpty(value) { return typeof value === 'string' && value.trim().leng
 function text(value) { return typeof value === 'string' ? value : '' }
 function isRecord(value) { return typeof value === 'object' && value !== null && !Array.isArray(value) }
 
+const usage = 'Usage: quotation-json.mjs build <partial.json> <quotation.json> | validate <quotation.json> | summarize <quotation.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | clear-goods-receipt-draft <quotation.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | self-test [output.json] [--json]'
+
 async function main() {
-  const [command, ...args] = process.argv.slice(2)
+  const [command, ...rawArgs] = process.argv.slice(2)
+  if (['help', '--help', '-h'].includes(command)) {
+    process.stdout.write(`${usage}\n`)
+    return
+  }
+  const jsonOutput = rawArgs.includes('--json')
+  const args = rawArgs.filter((argument) => argument !== '--json')
   if (command === 'self-test') return runSelfTest(args[0])
   if (command === 'set-goods-receipt-draft') {
     const [quotationPath, receiptPath, outputPath] = args
@@ -1426,8 +1456,18 @@ async function main() {
     const receiptInput = await readJsonFile(receiptPath)
     const { envelope, warnings } = setPendingGoodsReceiptDraftInEnvelope(quotationInput, receiptInput)
     await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
-    printResult({ errors: [], warnings })
-    process.stdout.write(`Built ${resolve(outputPath)}\n`)
+    printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
+    return
+  }
+  if (command === 'clear-goods-receipt-draft') {
+    const [quotationPath, outputPath] = args
+    if (!quotationPath || !outputPath) {
+      throw new Error('Usage: quotation-json.mjs clear-goods-receipt-draft <quotation.json> <output-quotation.json>')
+    }
+    const quotationInput = await readJsonFile(quotationPath)
+    const { envelope, warnings } = clearPendingGoodsReceiptDraftInEnvelope(quotationInput)
+    await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
+    printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
     return
   }
   if (command === 'add-goods-receipt') {
@@ -1439,42 +1479,52 @@ async function main() {
     const receiptInput = await readJsonFile(receiptPath)
     const { envelope, warnings } = addGoodsReceiptToEnvelope(quotationInput, receiptInput)
     await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
-    printResult({ errors: [], warnings })
-    process.stdout.write(`Built ${resolve(outputPath)}\n`)
+    printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
     return
   }
 
   const [inputPath, outputPath] = args
   if (!['build', 'validate', 'summarize'].includes(command) || !inputPath || (command === 'build' && !outputPath)) {
-    throw new Error('Usage: quotation-json.mjs build <partial.json> <quotation.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | validate <quotation.json> | summarize <quotation.json> | self-test')
+    throw new Error(usage)
   }
   if (command === 'validate') {
     const content = await readFile(resolve(inputPath), 'utf8')
     const result = validateQuotationJsonContent(content)
-    printResult(result)
+    printResult(result, jsonOutput)
     if (result.errors.length > 0) process.exitCode = 1
     return
   }
   if (command === 'summarize') {
     const summary = summarizeQuotationEnvelope(await readJsonFile(inputPath))
-    process.stdout.write(JSON.stringify(summary) + '\n')
+    process.stdout.write(`${JSON.stringify(summary)}\n`)
     return
   }
   const input = await readJsonFile(inputPath)
   const { envelope, warnings } = buildQuotationEnvelope(input)
   await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
-  printResult({ errors: [], warnings })
-  process.stdout.write(`Built ${resolve(outputPath)}\n`)
+  printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
 }
 
 async function readJsonFile(filePath) {
   return JSON.parse((await readFile(resolve(filePath), 'utf8')).replace(/^\uFEFF/, ''))
 }
 
-function printResult({ errors, warnings }) {
+function printResult({ errors, warnings, outputPath }, jsonOutput = false) {
+  if (jsonOutput) {
+    process.stdout.write(`${JSON.stringify({
+      ok: errors.length === 0,
+      errorCount: errors.length,
+      warningCount: warnings.length,
+      ...(errors.length ? { errors } : {}),
+      ...(warnings.length ? { warnings } : {}),
+      ...(outputPath ? { outputPath } : {}),
+    })}\n`)
+    return
+  }
   for (const error of errors) process.stderr.write(`ERROR: ${error}\n`)
   for (const warning of warnings) process.stdout.write(`WARNING: ${warning}\n`)
   if (errors.length === 0) process.stdout.write('Validation passed.\n')
+  if (outputPath) process.stdout.write(`Built ${outputPath}\n`)
 }
 
 async function runSelfTest(outputPath) {
@@ -1671,7 +1721,11 @@ async function runSelfTest(outputPath) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch((error) => {
-    process.stderr.write(`${error.message}\n`)
+    if (process.argv.includes('--json')) {
+      process.stderr.write(`${JSON.stringify({ ok: false, errorCount: 1, warningCount: 0, errors: [error.message] })}\n`)
+    } else {
+      process.stderr.write(`${error.message}\n`)
+    }
     process.exitCode = 1
   })
 }

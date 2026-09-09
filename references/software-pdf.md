@@ -41,7 +41,8 @@ Always run the bundled offline validator first. When the configured executable i
 ```powershell
 node <skill-folder>\scripts\quotation-software.mjs validate <quotation.json> `
   --no-network `
-  --result-json <validation-result.json>
+  --result-json <validation-result.json> `
+  --compact
 ```
 
 The application reports stable issue codes and field paths. Fix its errors before PDF delivery. If the application is unavailable, keep the independently validated JSON and state that application validation was not run.
@@ -58,7 +59,8 @@ node <skill-folder>\scripts\quotation-software.mjs render <quotation.json> `
   --goods-receipt-pdf <goods-receipt.pdf> `
   --output-json <normalized-quotation.json> `
   --no-network `
-  --result-json <export-result.json>
+  --result-json <export-result.json> `
+  --compact
 ```
 
 `export` remains a skill-helper alias for `render`, but new workflows should use `render`. Goods-receipt export requires a valid `quotation.pendingGoodsReceiptDraft`. Add `--refresh-exchange-rates` only when the user requests current/latest published rates; omit `--no-network` in that case. Do not replace an explicitly supplied historical or contract rate without permission.
@@ -71,12 +73,27 @@ Optional controls:
 - `--cancel-file <path>` cancels safely when the file appears between phases.
 - `--output-json <path>` saves the normalized quotation state used for rendering.
 
-The result JSON records the rate date, exact rates applied, output paths, warnings, and failure details. A refresh changes the in-memory quotation used for the PDFs; it does not modify the input quotation JSON.
+The result JSON records the rate date, exact rates applied, output paths, warnings, and failure details. `--compact` keeps console output to counts, key totals, and the first actionable error while the full report remains in `--result-json`. If no result path is supplied, the helper captures the GUI executable's report through a temporary file and removes it after use. A refresh changes the in-memory quotation used for the PDFs; it does not modify the input quotation JSON.
+
+## Sequential batch work
+
+For multiple quotations, use the application's native sequential batch command instead of launching portable-app operations in parallel:
+
+```powershell
+node <skill-folder>\scripts\quotation-software.mjs batch <manifest.json> `
+  --result-json <batch-result.json> `
+  --progress-json <batch-progress.json> `
+  --no-network `
+  --compact
+```
+
+Manifest schema and limits follow the configured application's `api-info`: schema version 1, up to 100 jobs, with paths resolved relative to the manifest. Read the full batch result only when its compact summary reports failures or warnings.
 
 ## Failure behavior
 
 - If configuration is missing or the executable moved, keep and deliver the validated JSON, explain why PDF was not produced, and ask for a new `.exe` path only when the user still wants PDF.
 - If the API-info compatibility probe fails or times out, do not retry by opening the GUI. The configured executable is outdated or incompatible; rebuild/configure the current portable application.
 - If the application returns a nonzero automation exit code, keep the JSON and report its structured errors. Never claim that a PDF exists without checking the output file.
+- The helper preserves the application's stable exit codes (`2` through `7`) so callers can distinguish usage, input, network, filesystem, rendering, and internal failures.
 - Do not substitute browser printing, HTML-to-PDF tools, screenshots, office converters, or a separately recreated PDF template. PDF output must come from the configured Quotation Software application.
 - Headless export does not modify the input JSON. To record a successfully exported goods receipt in JSON history, explicitly run `add-goods-receipt` with the real PDF path.
