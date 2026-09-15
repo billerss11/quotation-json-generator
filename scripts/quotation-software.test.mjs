@@ -1,12 +1,146 @@
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
+  configureCurrentSoftware,
+  configureSoftware,
   createAutomationArguments,
   createBatchArguments,
   createCompactAutomationSummary,
+  getSoftwareStatus,
   runExecutable,
 } from './quotation-software.mjs'
+
+async function createTestDirectory(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'quotation-software-test-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  return directory
+}
+
+async function writeJson(filePath, value) {
+  await mkdir(dirname(filePath), { recursive: true })
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+}
+
+async function writeManifest(filePath, softwarePath, appVersion, builtAt) {
+  await writeJson(filePath, { schemaVersion: 1, softwarePath, appVersion, builtAt })
+}
+
+test('keeps direct executable configuration compatible', async (t) => {
+  const directory = await createTestDirectory(t)
+  const executablePath = join(directory, 'Quotation Software.exe')
+  const configPath = join(directory, 'config', 'config.json')
+  await writeFile(executablePath, '')
+
+  const status = await configureSoftware(executablePath, configPath)
+  assert.equal(status.softwarePath, resolve(executablePath))
+  assert.equal(status.exists, true)
+  assert.equal(status.usable, true)
+  assert.equal(status.currentManifestPath, undefined)
+  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), {
+    schemaVersion: 1,
+    setupAcknowledged: true,
+    softwarePath: resolve(executablePath),
+  })
+})
+
+test('resolves a switched current manifest on every status call', async (t) => {
+  const directory = await createTestDirectory(t)
+  const configPath = join(directory, 'config.json')
+  const manifestPath = join(directory, 'current-portable.json')
+  const executableA = join(directory, 'releases', 'Quotation Software A.exe')
+  const executableB = join(directory, 'releases', 'Quotation Software B.exe')
+  await mkdir(dirname(executableA), { recursive: true })
+  await Promise.all([writeFile(executableA, ''), writeFile(executableB, '')])
+  await writeManifest(manifestPath, join('releases', 'Quotation Software A.exe'), '1.0.0', '2026-09-15T01:00:00.000Z')
+
+  const statusA = await configureCurrentSoftware(manifestPath, configPath)
+  assert.equal(statusA.currentManifestPath, resolve(manifestPath))
+  assert.equal(statusA.softwarePath, resolve(executableA))
+  assert.equal(statusA.appVersion, '1.0.0')
+
+  await writeManifest(manifestPath, join('releases', 'Quotation Software B.exe'), '2.0.0', '2026-09-15T02:00:00.000Z')
+  const statusB = await getSoftwareStatus(configPath)
+  assert.equal(statusB.softwarePath, resolve(executableB))
+  assert.equal(statusB.appVersion, '2.0.0')
+  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), {
+    schemaVersion: 1,
+    setupAcknowledged: true,
+    currentManifestPath: resolve(manifestPath),
+  })
+})
+
+test('rejects invalid or missing current manifests without using a direct fallback', async (t) => {
+  const directory = await createTestDirectory(t)
+  const configPath = join(directory, 'config.json')
+  const manifestPath = join(directory, 'current-portable.json')
+  const directExecutable = join(directory, 'direct.exe')
+  await writeFile(directExecutable, '')
+
+  await assert.rejects(
+    configureCurrentSoftware(manifestPath, configPath),
+    /manifest was not found/,
+  )
+
+  await writeFile(manifestPath, '{not json', 'utf8')
+  await assert.rejects(
+    configureCurrentSoftware(manifestPath, configPath),
+    /Could not read Quotation Software manifest/,
+  )
+
+  await writeJson(manifestPath, {
+    schemaVersion: 1,
+    softwarePath: 'missing.exe',
+    builtAt: '2026-09-15T01:00:00.000Z',
+  })
+  await assert.rejects(
+    configureCurrentSoftware(manifestPath, configPath),
+    /manifest appVersion must be a non-empty string/,
+  )
+
+  await writeManifest(manifestPath, resolve(directExecutable), '1.0.0', '2026-09-15T01:00:00.000Z')
+  await assert.rejects(
+    configureCurrentSoftware(manifestPath, configPath),
+    /softwarePath must be relative/,
+  )
+
+  await writeManifest(manifestPath, 'missing.exe', '1.0.0', '2026-09-15T01:00:00.000Z')
+  await assert.rejects(
+    configureCurrentSoftware(manifestPath, configPath),
+    /executable from the current manifest was not found/,
+  )
+
+  await writeJson(configPath, {
+    schemaVersion: 1,
+    setupAcknowledged: true,
+    currentManifestPath: join(directory, 'deleted-manifest.json'),
+    softwarePath: directExecutable,
+  })
+  await assert.rejects(
+    getSoftwareStatus(configPath),
+    /manifest was not found/,
+  )
+})
+
+test('reports a configured manifest executable that was removed', async (t) => {
+  const directory = await createTestDirectory(t)
+  const configPath = join(directory, 'config.json')
+  const manifestPath = join(directory, 'current-portable.json')
+  const executablePath = join(directory, 'Quotation Software.exe')
+  await writeFile(executablePath, '')
+  await writeManifest(manifestPath, 'Quotation Software.exe', '1.0.0', '2026-09-15T01:00:00.000Z')
+  await configureCurrentSoftware(manifestPath, configPath)
+
+  await unlink(executablePath)
+  const status = await getSoftwareStatus(configPath)
+  assert.equal(status.configured, true)
+  assert.equal(status.softwarePath, resolve(executablePath))
+  assert.equal(status.exists, false)
+  assert.equal(status.usable, false)
+})
 
 test('builds the stable render command with production options', () => {
   assert.deepEqual(createAutomationArguments({

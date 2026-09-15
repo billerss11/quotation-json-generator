@@ -16,11 +16,30 @@ Check configuration at the start of a skill invocation:
 node <skill-folder>\scripts\quotation-software.mjs status
 ```
 
-`status` confirms only that the configured file exists. Before V2 validation or rendering, the helper automatically probes `--automation api-info` with a bounded timeout and a temporary result file because packaged Windows GUI executables may not expose standard output. If that probe fails, the executable predates the stable automation CLI or is incompatible; continue delivering offline-validated JSON and configure a current portable build.
+`status` resolves the current manifest when one is configured and confirms that its selected executable exists. Before V2 validation or rendering, the helper automatically probes `--automation api-info` with a bounded timeout and a temporary result file because packaged Windows GUI executables may not expose standard output. One operation pins the resolved executable path for both the probe and execution, even if the manifest changes during that operation. If the probe fails, the executable predates the stable automation CLI or is incompatible; continue delivering offline-validated JSON and configure a current portable build.
 
 When `setupAcknowledged` is `false`, ask the user once for the full path to the portable `.exe`, while continuing any JSON-generation work. The software question must never become a prerequisite for JSON.
 
-Configure a supplied executable:
+For a maintained build, configure its fixed manifest path. The project command `npm run package:win:portable:current` is the only packaging command that updates `release/current-portable.json`, and it does so only after verifying the new portable executable. Ordinary packaging commands leave the current manifest unchanged.
+
+```powershell
+node <skill-folder>\scripts\quotation-software.mjs configure-current 'D:\Quotation Software\release\current-portable.json'
+```
+
+The helper stores the absolute `currentManifestPath`, then reads the manifest again on every `status`, validation, render, or batch invocation. The manifest contract is:
+
+```json
+{
+  "schemaVersion": 1,
+  "softwarePath": "portable/Quotation Software 0.2.0.exe",
+  "appVersion": "0.2.0",
+  "builtAt": "2026-09-15T01:00:00.000Z"
+}
+```
+
+`softwarePath` must be a relative path to an `.exe`, resolved from the manifest directory. `appVersion` and `builtAt` must be non-empty strings. A missing or invalid configured manifest is an error; the helper does not fall back to an older direct executable path.
+
+Direct configuration remains available when the user wants to pin one supplied executable:
 
 ```powershell
 node <skill-folder>\scripts\quotation-software.mjs configure 'D:\Tools\Quotation Software 0.1.0.exe'

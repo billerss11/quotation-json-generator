@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, extname, join, resolve } from 'node:path'
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
@@ -11,6 +11,7 @@ import { pathToFileURL } from 'node:url'
 import { validateQuotationJsonContent } from './quotation-json.mjs'
 
 const configSchemaVersion = 1
+const softwareManifestSchemaVersion = 1
 const apiProbeTimeoutMs = 15_000
 
 export class QuotationSoftwareExecutionError extends Error {
@@ -30,6 +31,30 @@ export function getDefaultConfigPath() {
 export async function getSoftwareStatus(configPath = getDefaultConfigPath()) {
   const resolvedConfigPath = resolve(configPath)
   const config = await readConfig(resolvedConfigPath)
+
+  if (config && Object.prototype.hasOwnProperty.call(config, 'currentManifestPath')) {
+    if (typeof config.currentManifestPath !== 'string' || !config.currentManifestPath.trim()) {
+      throw new Error(`Quotation Software configuration has an invalid currentManifestPath: ${resolvedConfigPath}`)
+    }
+
+    const currentManifestPath = resolve(cleanPathInput(config.currentManifestPath))
+    const manifest = await readSoftwareManifest(currentManifestPath)
+    const softwarePath = resolve(dirname(currentManifestPath), manifest.softwarePath)
+    const exists = await isExecutableFile(softwarePath)
+
+    return {
+      configPath: resolvedConfigPath,
+      setupAcknowledged: config.setupAcknowledged === true,
+      configured: true,
+      currentManifestPath,
+      softwarePath,
+      appVersion: manifest.appVersion,
+      builtAt: manifest.builtAt,
+      exists,
+      usable: exists,
+    }
+  }
+
   const softwarePath = typeof config?.softwarePath === 'string' && config.softwarePath.trim()
     ? resolve(config.softwarePath)
     : null
@@ -71,8 +96,30 @@ export async function acknowledgeMissingSoftware(configPath = getDefaultConfigPa
   return getSoftwareStatus(configPath)
 }
 
+export async function configureCurrentSoftware(manifestPath, configPath = getDefaultConfigPath()) {
+  const currentManifestPath = resolve(cleanPathInput(manifestPath))
+  const manifest = await readSoftwareManifest(currentManifestPath)
+  const softwarePath = resolve(dirname(currentManifestPath), manifest.softwarePath)
+
+  if (!(await isExecutableFile(softwarePath))) {
+    throw new Error(`Quotation Software executable from the current manifest was not found: ${softwarePath}`)
+  }
+
+  await writeConfig(configPath, {
+    schemaVersion: configSchemaVersion,
+    setupAcknowledged: true,
+    currentManifestPath,
+  })
+
+  return getSoftwareStatus(configPath)
+}
+
 export async function getSoftwareApiInfo(configPath = getDefaultConfigPath(), probeDirectory = process.cwd()) {
   const status = await getSoftwareStatus(configPath)
+  return probeSoftwareApi(status, probeDirectory)
+}
+
+async function probeSoftwareApi(status, probeDirectory) {
   if (!status.usable || !status.softwarePath) {
     throw new Error(status.configured
       ? `The configured Quotation Software executable is missing: ${status.softwarePath}`
@@ -98,7 +145,7 @@ export async function getSoftwareApiInfo(configPath = getDefaultConfigPath(), pr
     if (Number(apiInfo.apiVersion.split('.')[0]) < 2) {
       throw new Error(`Quotation Software automation API ${apiInfo.apiVersion} is too old; version 2 or later is required.`)
     }
-    return { softwarePath: status.softwarePath, ...apiInfo }
+    return { ...apiInfo, softwarePath: status.softwarePath }
   } finally {
     await unlink(probeResultPath).catch(() => undefined)
   }
@@ -189,7 +236,7 @@ export async function runAutomationBatch({
   for (const outputPath of [effectiveResultJson, resolvedProgressJson]) {
     if (outputPath) await mkdir(dirname(outputPath), { recursive: true })
   }
-  const apiInfo = await getSoftwareApiInfo(configPath, dirname(effectiveResultJson))
+  const apiInfo = await probeSoftwareApi(status, dirname(effectiveResultJson))
   if (!Array.isArray(apiInfo.commands) || !apiInfo.commands.includes('batch')) {
     throw new Error('The configured Quotation Software executable does not support automation batch jobs.')
   }
@@ -220,7 +267,7 @@ export async function runAutomationBatch({
       }
     }
 
-    return { softwarePath: status.softwarePath, ...(report ?? { ok: true }) }
+    return { ...(report ?? { ok: true }), softwarePath: status.softwarePath }
   } finally {
     if (!resolvedResultJson) await unlink(effectiveResultJson).catch(() => undefined)
   }
@@ -285,7 +332,7 @@ async function runAutomationDocument({
   ]) {
     if (outputPath) await mkdir(dirname(outputPath), { recursive: true })
   }
-  await getSoftwareApiInfo(configPath, dirname(effectiveResultJson))
+  await probeSoftwareApi(status, dirname(effectiveResultJson))
 
   try {
     const processResult = await runExecutable(status.softwarePath, args)
@@ -307,8 +354,8 @@ async function runAutomationDocument({
     }
 
     return {
-      softwarePath: status.softwarePath,
       ...(report ?? { ok: true }),
+      softwarePath: status.softwarePath,
     }
   } finally {
     if (!resolvedResultJson) await unlink(effectiveResultJson).catch(() => undefined)
@@ -375,7 +422,7 @@ export function createBatchArguments({
 }
 
 const usage = [
-  'Usage: quotation-software.mjs status | api-info | version | configure <quotation-software.exe> | skip-setup',
+  'Usage: quotation-software.mjs status | api-info | version | configure <quotation-software.exe> | configure-current <manifest.json> | skip-setup',
   '       quotation-software.mjs validate|render <quotation.json> [automation options] [--compact]',
   '       quotation-software.mjs batch <manifest.json> [automation options] [--compact]',
 ].join('\n')
@@ -396,6 +443,11 @@ async function main() {
   if (command === 'configure') {
     if (!positional[0]) throw new Error('Usage: quotation-software.mjs configure <quotation-software.exe> [--config <config.json>]')
     printJson(await configureSoftware(positional[0], configPath))
+    return
+  }
+  if (command === 'configure-current') {
+    if (!positional[0]) throw new Error('Usage: quotation-software.mjs configure-current <manifest.json> [--config <config.json>]')
+    printJson(await configureCurrentSoftware(positional[0], configPath))
     return
   }
   if (command === 'skip-setup') {
@@ -518,6 +570,46 @@ async function writeConfig(configPath, value) {
 
 async function readJson(filePath) {
   return JSON.parse((await readFile(resolve(filePath), 'utf8')).replace(/^\uFEFF/, ''))
+}
+
+async function readSoftwareManifest(manifestPath) {
+  let manifest
+  try {
+    manifest = await readJson(manifestPath)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new Error(`Configured Quotation Software manifest was not found: ${manifestPath}`)
+    }
+    throw new Error(`Could not read Quotation Software manifest ${manifestPath}: ${error.message}`)
+  }
+
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error(`Quotation Software manifest must contain a JSON object: ${manifestPath}`)
+  }
+  if (manifest.schemaVersion !== softwareManifestSchemaVersion) {
+    throw new Error(`Quotation Software manifest schemaVersion must be ${softwareManifestSchemaVersion}: ${manifestPath}`)
+  }
+  if (typeof manifest.softwarePath !== 'string' || !manifest.softwarePath.trim()) {
+    throw new Error(`Quotation Software manifest softwarePath must be a non-empty relative path: ${manifestPath}`)
+  }
+  if (isAbsolute(manifest.softwarePath)) {
+    throw new Error(`Quotation Software manifest softwarePath must be relative to the manifest directory: ${manifestPath}`)
+  }
+  if (extname(manifest.softwarePath).toLowerCase() !== '.exe') {
+    throw new Error(`Quotation Software manifest softwarePath must point to an .exe file: ${manifestPath}`)
+  }
+  for (const field of ['appVersion', 'builtAt']) {
+    if (typeof manifest[field] !== 'string' || !manifest[field].trim()) {
+      throw new Error(`Quotation Software manifest ${field} must be a non-empty string: ${manifestPath}`)
+    }
+  }
+
+  return {
+    schemaVersion: softwareManifestSchemaVersion,
+    softwarePath: manifest.softwarePath,
+    appVersion: manifest.appVersion,
+    builtAt: manifest.builtAt,
+  }
 }
 
 async function readJsonIfPresent(filePath) {

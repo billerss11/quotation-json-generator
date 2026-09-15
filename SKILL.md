@@ -18,6 +18,8 @@ Create a complete schema-v2 quotation JSON that works independently of Quotation
 
 Receipt modes are distinct: use `quotation.pendingGoodsReceiptDraft` for a receipt the user will edit or export through **Generate GR**; use `quotation.goodsReceiptHistory` only for an already completed/exported receipt or an explicitly requested archival record.
 
+For a maintained portable build with a `current-portable.json` manifest, use the `configure-current` setup described in `software-pdf.md` so later builds are discovered automatically. Direct `.exe` configuration remains supported for a fixed build.
+
 ## Workflow
 
 1. Inspect every supplied source. Extract evidence into a partial quotation object while keeping hierarchy, quantities, units, currencies, pricing meaning, markup, and tax assignments separate.
