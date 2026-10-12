@@ -16,11 +16,13 @@ Check configuration at the start of a skill invocation:
 node <skill-folder>\scripts\quotation-software.mjs status
 ```
 
-`status` resolves the current manifest when one is configured and confirms that its selected executable exists. Before V2 validation or rendering, the helper automatically probes `--automation api-info` with a bounded timeout and a temporary result file because packaged Windows GUI executables may not expose standard output. One operation pins the resolved executable path for both the probe and execution, even if the manifest changes during that operation. If the probe fails, the executable predates the stable automation CLI or is incompatible; continue delivering offline-validated JSON and configure a current portable build.
+`status` resolves the current manifest and confirms that its selected executable exists; `usable: true` is not a schema-compatibility claim. Before validation or rendering, the helper probes `--automation api-info` with a bounded timeout and temporary result file, then checks the input schema against the reported `quotationSchemaVersion`. Batch jobs are all checked before any job runs. One operation pins the resolved executable for both probe and execution, even if the manifest changes. A schema-2 executable cannot process schema-3 history; do not remove history or relabel the file to get past that check.
+
+Use `node <skill-folder>\scripts\quotation-software.mjs api-info` to inspect the configured build. API 2.1 plus schema 3 is sufficient for ordinary CLI validation/rendering; API 2.2 adds renderer revision deletion. A source checkout update does not automatically rebuild the portable executable. If the selected build is old, keep the valid JSON and report PDF/application validation as pending until a current build is available.
 
 When `setupAcknowledged` is `false`, ask the user once for the full path to the portable `.exe`, while continuing any JSON-generation work. The software question must never become a prerequisite for JSON.
 
-For a maintained build, configure its fixed manifest path. The project command `npm run package:win:portable:current` is the only packaging command that updates `release/current-portable.json`, and it does so only after verifying the new portable executable. Ordinary packaging commands leave the current manifest unchanged.
+For a maintained build, configure its fixed manifest path. The project command `npm run package:win:portable:current` updates `release/current-portable.json` only after verifying the new portable executable; `package:win:portable` is an alias. Installer packaging preserves the selected portable build. Packaging is separate work and is not required for offline JSON generation.
 
 ```powershell
 node <skill-folder>\scripts\quotation-software.mjs configure-current 'D:\Quotation Software\release\current-portable.json'
@@ -68,7 +70,7 @@ The application reports stable issue codes and field paths. Fix its errors befor
 
 ## Render sequence
 
-Build and validate the schema-v2 JSON before rendering. This ordering preserves the useful JSON artifact even if the application is absent, moved, incompatible, or fails.
+Build and validate schema-v3 JSON before rendering. This ordering preserves the JSON artifact even if the application is absent, moved, incompatible, or fails. Existing legacy-v2 files may still be validated/rendered unchanged by a compatible older app.
 
 Export either or both documents:
 
@@ -83,6 +85,8 @@ node <skill-folder>\scripts\quotation-software.mjs render <quotation.json> `
 ```
 
 `export` remains a skill-helper alias for `render`, but new workflows should use `render`. Goods-receipt export requires a valid `quotation.pendingGoodsReceiptDraft`. Add `--refresh-exchange-rates` only when the user requests current/latest published rates; omit `--no-network` in that case. Do not replace an explicitly supplied historical or contract rate without permission.
+
+The portable CLI renders the working quotation. It has no saved-revision selection flag. For an archived quotation PDF in an open compatible app, use the renderer API's `exportPdfToFile(path, { quotationRevisionId })` from [agent-api-v2.md](agent-api-v2.md). Do not overwrite the working quotation or fabricate a CLI flag to select history.
 
 Optional controls:
 
@@ -112,6 +116,7 @@ Manifest schema and limits follow the configured application's `api-info`: schem
 
 - If configuration is missing or the executable moved, keep and deliver the validated JSON, explain why PDF was not produced, and ask for a new `.exe` path only when the user still wants PDF.
 - If the API-info compatibility probe fails or times out, do not retry by opening the GUI. The configured executable is outdated or incompatible; rebuild/configure the current portable application.
+- `quotation_schema_unsupported` or `quotation_schema_unknown` (exit code 3) means compatibility could not be established before execution. Keep the input and all history unchanged. Do not rebuild/configure software unless that work is part of the user's request.
 - If the application returns a nonzero automation exit code, keep the JSON and report its structured errors. Never claim that a PDF exists without checking the output file.
 - The helper preserves the application's stable exit codes (`2` through `7`) so callers can distinguish usage, input, network, filesystem, rendering, and internal failures.
 - Do not substitute browser printing, HTML-to-PDF tools, screenshots, office converters, or a separately recreated PDF template. PDF output must come from the configured Quotation Software application.

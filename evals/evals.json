@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "I do not have the quotation software on this computer. Create an import-ready USD quotation JSON for two PX-100 pumps at USD 1200 each, manual selling price USD 1500, customer Acme Marine, quotation Q-2026-101. Do not make PDF.",
-      "expected_output": "A validated schema-v2 quotation JSON is delivered without requiring or attempting to use Quotation Software.",
+      "expected_output": "A validated schema-v3 quotation JSON is delivered without requiring or attempting to use Quotation Software.",
       "files": [],
       "expectations": [
         "The final quotation JSON passes the bundled validator.",
@@ -26,25 +26,90 @@
     {
       "id": 3,
       "prompt": "Using my configured quotation software, create quotation and goods-receipt PDFs from a complete bilingual-capable quotation JSON. Use the latest published exchange rates and give me the JSON, both PDFs, and the export result.",
-      "expected_output": "The JSON validates independently, the configured portable app exports both PDFs with refresh enabled, and result JSON records the rate date and exact rates.",
+      "expected_output": "The JSON validates independently. A compatible configured portable app exports both PDFs with refresh enabled and records exact rates; an older incompatible app leaves the JSON intact and PDF output pending.",
       "files": [
         "evals/fixtures/quotation-with-receipt.json"
       ],
       "expectations": [
         "The quotation JSON passes validation before PDF export starts.",
-        "Both PDFs are produced by the configured Quotation Software executable.",
+        "PDFs are produced only by a schema-compatible configured Quotation Software executable; incompatibility is reported without dropping history or claiming PDF success.",
         "The export result records exchangeRateDate and the exact applied exchangeRates."
       ]
     },
     {
       "id": 4,
       "prompt": "Create an import-ready quotation using the spreadsheet template. If my quotation editor is already open, import it through the current programmatic API and validate it for quotation PDF export.",
-      "expected_output": "The generated schema-v2 JSON preserves templateId spreadsheet, passes offline validation, and uses quotationAgentV2 with export preflight when an open editor is available.",
+      "expected_output": "The generated schema-v3 JSON preserves templateId spreadsheet, passes offline validation, and uses quotationAgentV2 with export preflight when an open editor is available.",
       "files": [],
       "expectations": [
         "The final JSON contains quotation.templateId set to spreadsheet rather than classic.",
         "The bundled validator passes the final file.",
         "Open-editor automation awaits quotationAgentReady and prefers quotationAgentV2 over UI simulation or the legacy API."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Update the working quotation validity to 60 days. Keep all existing saved revisions unchanged; do not create a new revision. I only need JSON.",
+      "expected_output": "A valid schema-v3 JSON with changed working validity and byte-equivalent saved revision data.",
+      "files": [
+        "evals/fixtures/quotation-with-revisions.json"
+      ],
+      "expectations": [
+        "The complete envelope passes offline validation.",
+        "The family ID, archive IDs, archive snapshots, and working revision number are unchanged.",
+        "Only the working quotation validity changes; no application is required."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Create the next revision from this quotation, then add a new row for two valves at USD 45 cost each. Keep the previous offer in history. JSON only.",
+      "expected_output": "The current working revision is frozen before adding the new row to the next working revision.",
+      "files": [
+        "evals/fixtures/quotation-with-revisions.json"
+      ],
+      "expectations": [
+        "All earlier saved snapshots remain unchanged.",
+        "The newly saved snapshot contains the pre-edit working quotation without the valves.",
+        "The next working revision increments once and includes the requested new row with a unique ID."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Restore saved revision 1 as a new working revision. Keep completed goods receipts. Return an updated JSON without using the app.",
+      "expected_output": "Current work is archived, revision 1 is copied into the next numbered draft, completed receipts remain, and the pending receipt is cleared.",
+      "files": [
+        "evals/fixtures/quotation-with-revisions.json"
+      ],
+      "expectations": [
+        "The output passes offline validation.",
+        "Existing archives are unchanged and the former working quotation is archived.",
+        "The family ID and current completed goods-receipt records are retained; pendingGoodsReceiptDraft is absent from the new working quotation."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Delete saved revision 1 from this quotation. Keep the working draft and other revision numbers as they are. Write a separate output JSON.",
+      "expected_output": "Only the selected archive is removed, with no renumbering or loss of working data.",
+      "files": [
+        "evals/fixtures/quotation-with-revisions.json"
+      ],
+      "expectations": [
+        "The source file is unchanged and the output validates.",
+        "Saved revision 2 retains its original ID, number, and contents.",
+        "Working revision 3 and its commercial data remain unchanged."
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Render this quotation with history using my configured app. Its api-info reports API 2.0.0 and quotationSchemaVersion 2. Do not change any quotation data.",
+      "expected_output": "The skill retains validated schema-v3 JSON and reports the app compatibility blocker without removing history or claiming a PDF.",
+      "files": [
+        "evals/fixtures/quotation-with-revisions.json"
+      ],
+      "expectations": [
+        "No schema downgrade or history stripping occurs.",
+        "The old app is not used to render the unsupported file.",
+        "The response identifies a compatible portable build as needed; it does not rebuild or change configuration without that work being requested."
       ]
     }
   ]

@@ -151,6 +151,60 @@ async function probeSoftwareApi(status, probeDirectory) {
   }
 }
 
+async function assertInputSchemaCompatibility(command, apiInfo, inputs) {
+  const supportedSchemaVersion = apiInfo.quotationSchemaVersion
+  const remedy = 'Build the current portable application (npm run package:win:portable:current) and use configure-current with its release/current-portable.json, or configure a compatible .exe. Keep the JSON and revision history unchanged; no document jobs were started.'
+  const errors = []
+  if (!Number.isInteger(supportedSchemaVersion) || supportedSchemaVersion < 1) {
+    errors.push({
+      code: 'quotation_schema_unknown',
+      message: `The configured application did not report a valid quotationSchemaVersion. ${remedy}`,
+      fieldPath: 'quotationSchemaVersion',
+    })
+  } else {
+    for (const { inputFile, jobId, fieldPath = 'schemaVersion' } of inputs) {
+      let input
+      try {
+        input = await readJson(inputFile)
+      } catch (error) {
+        errors.push({
+          code: 'quotation_input_read_failed',
+          message: `Could not read quotation JSON ${inputFile}: ${error.message}`,
+          fieldPath,
+          details: { inputFile, ...(jobId ? { jobId } : {}) },
+        })
+        continue
+      }
+      if (typeof input?.schemaVersion === 'number' && input.schemaVersion > supportedSchemaVersion) {
+        errors.push({
+          code: 'quotation_schema_unsupported',
+          message: `Quotation JSON ${inputFile} uses schema ${input.schemaVersion}, but the configured application supports schema ${supportedSchemaVersion}. ${remedy}`,
+          fieldPath,
+          details: {
+            inputFile,
+            inputSchemaVersion: input.schemaVersion,
+            supportedSchemaVersion,
+            ...(jobId ? { jobId } : {}),
+          },
+        })
+      }
+    }
+  }
+  if (errors.length > 0) {
+    throw new QuotationSoftwareExecutionError(errors.map(error => error.message).join('\n'), 3, {
+      ok: false,
+      command,
+      exitCode: 3,
+      apiVersion: apiInfo.apiVersion,
+      quotationSchemaVersion: supportedSchemaVersion ?? null,
+      softwarePath: apiInfo.softwarePath,
+      errors,
+      warnings: [],
+      outputs: [],
+    })
+  }
+}
+
 export async function validateDocument({
   inputFile,
   outputJson,
@@ -240,6 +294,31 @@ export async function runAutomationBatch({
   if (!Array.isArray(apiInfo.commands) || !apiInfo.commands.includes('batch')) {
     throw new Error('The configured Quotation Software executable does not support automation batch jobs.')
   }
+  let manifest
+  try {
+    manifest = await readJson(resolvedManifestFile)
+  } catch (error) {
+    const message = `Could not read the batch manifest: ${error.message}`
+    throw new QuotationSoftwareExecutionError(message, 3, {
+      ok: false,
+      command: 'batch',
+      exitCode: 3,
+      errors: [{ code: 'manifest_read_failed', message }],
+      warnings: [],
+      outputs: [],
+    })
+  }
+  // The application still performs full manifest validation before starting jobs.
+  const inputs = (Array.isArray(manifest?.jobs) ? manifest.jobs : []).flatMap((job, index) => (
+    typeof job?.input === 'string' && job.input.trim()
+      ? [{
+          inputFile: resolve(dirname(resolvedManifestFile), job.input.trim()),
+          jobId: job.id || `job-${index + 1}`,
+          fieldPath: `jobs[${index}].input`,
+        }]
+      : []
+  ))
+  await assertInputSchemaCompatibility('batch', apiInfo, inputs)
 
   const args = createBatchArguments({
     manifestFile: resolvedManifestFile,
@@ -332,7 +411,8 @@ async function runAutomationDocument({
   ]) {
     if (outputPath) await mkdir(dirname(outputPath), { recursive: true })
   }
-  await probeSoftwareApi(status, dirname(effectiveResultJson))
+  const apiInfo = await probeSoftwareApi(status, dirname(effectiveResultJson))
+  await assertInputSchemaCompatibility(command, apiInfo, [{ inputFile: resolvedInputFile }])
 
   try {
     const processResult = await runExecutable(status.softwarePath, args)

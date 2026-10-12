@@ -28,6 +28,8 @@ export const automationLimits = {
   goodsReceiptDraftBytes: 5 * mebibyte,
 }
 const allowedEnvelopeFields = new Set(['schemaVersion', 'app', 'exportedAt', 'quotation'])
+const allowedV3EnvelopeFields = new Set([...allowedEnvelopeFields, 'revisions'])
+const allowedRevisionFields = new Set(['id', 'revisionNumber', 'createdAt', 'note', 'quotation'])
 const allowedQuotationFields = new Set([
   'id', 'templateId', 'companyProfileId', 'companyProfileSnapshot', 'header', 'majorItems',
   // Accepted only so older app exports can still be validated and updated.
@@ -73,10 +75,36 @@ const supportedCurrencies = new Set(
 
 export function buildQuotationEnvelope(input, now = new Date()) {
   if (!isRecord(input)) throw new Error('Input must be a JSON object.')
+  if (input.schemaVersion !== undefined && ![1, 2, 3].includes(input.schemaVersion)) {
+    throw new Error('Unsupported schemaVersion; expected 1, 2, or 3.')
+  }
+  if (input.revisions !== undefined && input.schemaVersion !== 3) {
+    throw new Error('Revision history requires a complete schemaVersion 3 envelope.')
+  }
+  // Working rows may be partial, but the family identity and saved history must be valid.
+  if (input.schemaVersion === 3) {
+    const errors = []
+    validateEnvelopeFields(input, errors)
+    if (!isRecord(input.quotation)) {
+      errors.push('quotation must be an object.')
+    } else {
+      validateAllowedFields(input.quotation, allowedQuotationFields, 'quotation', errors)
+      if (!nonEmpty(input.quotation.id)) errors.push('quotation.id must be non-empty.')
+      if (!isPositiveSafeInteger(input.quotation.header?.revisionNumber)) {
+        errors.push('header.revisionNumber must be a positive safe integer.')
+      }
+    }
+    validateRevisions(input, errors, [])
+    if (errors.length) throw new Error(`Cannot build quotation:\n- ${errors.join('\n- ')}`)
+  }
 
   const warnings = []
   const source = isRecord(input.quotation) ? input.quotation : input
+  if (source !== input && 'revisions' in source) throw new Error('quotation cannot contain nested revisions.')
   const headerSource = isRecord(source.header) ? source.header : {}
+  if (headerSource.revisionNumber !== undefined && !isPositiveSafeInteger(headerSource.revisionNumber)) {
+    throw new Error('header.revisionNumber must be a positive safe integer.')
+  }
   const locale = locales.has(headerSource.documentLocale) ? headerSource.documentLocale : 'en-US'
   const parsedCurrency = normalizeCurrency(headerSource.currency)
   const baseCurrency = parsedCurrency ?? 'USD'
@@ -105,13 +133,13 @@ export function buildQuotationEnvelope(input, now = new Date()) {
   if (!finiteNumber(totalsSource.globalMarkupRate)) warnings.push('Global markup was missing or invalid; used 0%.')
 
   const quotation = {
-    id: nonEmpty(source.id) ? source.id.trim() : randomUUID(),
+    id: nonEmpty(source.id) ? source.id : randomUUID(),
     templateId: normalizeQuotationTemplateId(source.templateId),
     companyProfileId: nonEmpty(source.companyProfileId) ? source.companyProfileId.trim() : null,
     companyProfileSnapshot: buildCompanyProfile(source.companyProfileSnapshot),
     header: {
       quotationNumber,
-      revisionNumber: positiveInteger(headerSource.revisionNumber, 1),
+      revisionNumber: headerSource.revisionNumber ?? 1,
       quotationDate: dateOnly(headerSource.quotationDate) ?? timestamp.slice(0, 10),
       customerCompany: text(headerSource.customerCompany),
       contactPerson: text(headerSource.contactPerson),
@@ -162,7 +190,10 @@ export function buildQuotationEnvelope(input, now = new Date()) {
     quotation.goodsReceiptHistory = structuredClone(source.goodsReceiptHistory)
   }
 
-  const envelope = { schemaVersion: 2, app: 'quotation-software', exportedAt: timestamp, quotation }
+  const envelope = {
+    schemaVersion: 3, app: 'quotation-software', exportedAt: timestamp, quotation,
+    revisions: input.schemaVersion === 3 ? structuredClone(input.revisions) : [],
+  }
   const result = validateQuotationEnvelope(envelope)
   if (result.errors.length > 0) throw new Error(`Cannot build quotation:\n- ${result.errors.join('\n- ')}`)
   return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
@@ -172,16 +203,28 @@ export function validateQuotationEnvelope(value) {
   const errors = []
   const warnings = []
   if (!isRecord(value)) return { errors: ['Root value must be an object.'], warnings }
-  validateAllowedFields(value, allowedEnvelopeFields, 'root', errors)
+  validateEnvelopeFields(value, errors)
+  const active = validateQuotation(value.quotation)
+  errors.push(...active.errors)
+  warnings.push(...active.warnings)
+  if (value.schemaVersion === 3) validateRevisions(value, errors, warnings)
+  return { errors, warnings: [...new Set(warnings)] }
+}
+
+function validateEnvelopeFields(value, errors) {
+  validateAllowedFields(value, value.schemaVersion === 3 ? allowedV3EnvelopeFields : allowedEnvelopeFields, 'root', errors)
   if (getUtf8ByteLength(JSON.stringify(value)) > automationLimits.quotationJsonBytes) {
     errors.push(`Quotation JSON exceeds the ${automationLimits.quotationJsonBytes} byte limit.`)
   }
-  if (value.schemaVersion !== 2) errors.push('schemaVersion must be 2.')
+  if (![2, 3].includes(value.schemaVersion)) errors.push('schemaVersion must be 2 or 3.')
   if (value.app !== 'quotation-software') errors.push('app must be quotation-software.')
   if (!canonicalIso(value.exportedAt)) errors.push('exportedAt must be a canonical UTC ISO timestamp.')
-  if (!isRecord(value.quotation)) return { errors: [...errors, 'quotation must be an object.'], warnings }
+}
 
-  const quotation = value.quotation
+function validateQuotation(quotation) {
+  const errors = []
+  const warnings = []
+  if (!isRecord(quotation)) return { errors: ['quotation must be an object.'], warnings }
   validateAllowedFields(quotation, allowedQuotationFields, 'quotation', errors)
   if (!nonEmpty(quotation.id)) errors.push('quotation.id must be non-empty.')
   if (!templates.has(quotation.templateId)) errors.push('quotation.templateId is unsupported.')
@@ -241,6 +284,116 @@ export function validateQuotationEnvelope(value) {
   return { errors, warnings: [...new Set(warnings)] }
 }
 
+function validateRevisions(value, errors, warnings) {
+  if (!Array.isArray(value.revisions)) {
+    errors.push('revisions must be an array for schemaVersion 3.')
+    return
+  }
+  const ids = new Set()
+  const numbers = new Set()
+  value.revisions.forEach((revision, index) => {
+    const path = `revisions[${index}]`
+    if (!isRecord(revision)) {
+      errors.push(`${path} must be an object.`)
+      return
+    }
+    validateAllowedFields(revision, allowedRevisionFields, path, errors)
+    validateUniqueId(revision.id, path, ids, errors)
+    if (!isPositiveSafeInteger(revision.revisionNumber)) {
+      errors.push(`${path}.revisionNumber must be a positive safe integer.`)
+    }
+    if (numbers.has(revision.revisionNumber)) errors.push(`${path}.revisionNumber must be unique.`)
+    numbers.add(revision.revisionNumber)
+    if (revision.revisionNumber >= value.quotation?.header?.revisionNumber) {
+      errors.push(`${path}.revisionNumber must be lower than the active quotation revisionNumber.`)
+    }
+    if (!canonicalIso(revision.createdAt)) errors.push(`${path}.createdAt must be a canonical UTC ISO timestamp.`)
+    if (revision.note !== undefined && typeof revision.note !== 'string') errors.push(`${path}.note must be a string.`)
+    if (isRecord(revision.quotation)) {
+      if (revision.quotation.id !== value.quotation?.id) errors.push(`${path}.quotation.id must match the active quotation family ID.`)
+      if (revision.quotation.header?.revisionNumber !== revision.revisionNumber) {
+        errors.push(`${path}.quotation.header.revisionNumber must match the archived revisionNumber.`)
+      }
+    }
+    const result = validateQuotation(revision.quotation)
+    errors.push(...result.errors.map((error) => `${path}.${error.startsWith('quotation') ? error : `quotation.${error}`}`))
+    warnings.push(...result.warnings.map((warning) => `${path}.quotation.${warning}`))
+  })
+}
+
+function assertValidEnvelope(value, action) {
+  const result = validateQuotationEnvelope(value)
+  if (result.errors.length) throw new Error(`Cannot ${action}:\n- ${result.errors.join('\n- ')}`)
+  return result.warnings
+}
+
+function upgradeEnvelope(envelope) {
+  envelope.schemaVersion = 3
+  envelope.revisions ??= []
+  return envelope
+}
+
+export function listQuotationRevisions(value) {
+  assertValidEnvelope(value, 'list revisions from an invalid quotation')
+  return (value.revisions ?? []).map(({ id, revisionNumber, createdAt, note }) => ({
+    id, revisionNumber, createdAt, ...(note === undefined ? {} : { note }),
+  }))
+}
+
+export function createQuotationRevisionInEnvelope(value, options = {}, now = new Date()) {
+  if (!isRecord(options) || Object.keys(options).some((key) => key !== 'note')
+    || (options.note !== undefined && typeof options.note !== 'string')) {
+    throw new Error('Revision options must be an object with an optional string note.')
+  }
+  return advanceQuotationRevision(value, options, now)
+}
+
+export function restoreQuotationRevisionInEnvelope(value, revisionId, now = new Date()) {
+  if (!nonEmpty(revisionId)) throw new Error('A non-empty revision ID is required.')
+  return advanceQuotationRevision(value, { restoreRevisionId: revisionId }, now)
+}
+
+function advanceQuotationRevision(value, options, now) {
+  const warnings = assertValidEnvelope(value, 'change revisions on an invalid quotation')
+  const envelope = upgradeEnvelope(structuredClone(value))
+  const current = envelope.quotation
+  const currentNumber = current.header.revisionNumber
+  if (currentNumber === Number.MAX_SAFE_INTEGER) throw new Error('Cannot create the next revision: revision number overflow.')
+  const restored = options.restoreRevisionId === undefined
+    ? undefined : envelope.revisions.find((revision) => revision.id === options.restoreRevisionId)
+  if (options.restoreRevisionId !== undefined && !restored) throw new Error(`Revision not found: ${options.restoreRevisionId}`)
+  const timestamp = now.toISOString()
+  const quotation = structuredClone(restored?.quotation ?? current)
+  quotation.id = current.id
+  quotation.header.revisionNumber = currentNumber + 1
+  quotation.metadata = { createdAt: current.metadata.createdAt, updatedAt: timestamp }
+  quotation.goodsReceiptHistory = structuredClone(current.goodsReceiptHistory ?? [])
+  if (restored) delete quotation.pendingGoodsReceiptDraft
+  const note = options.note?.trim()
+  envelope.revisions.push({
+    id: randomUUID(), revisionNumber: currentNumber, createdAt: timestamp,
+    ...(note ? { note } : {}), quotation: current,
+  })
+  envelope.quotation = quotation
+  envelope.exportedAt = timestamp
+  const resultWarnings = assertValidEnvelope(envelope, 'create the next quotation revision')
+  return { envelope, warnings: [...new Set([...warnings, ...resultWarnings])] }
+}
+
+export function deleteQuotationRevisionFromEnvelope(value, revisionId, now = new Date()) {
+  const warnings = assertValidEnvelope(value, 'delete revisions from an invalid quotation')
+  if (!nonEmpty(revisionId)) throw new Error('A non-empty revision ID is required.')
+  const envelope = upgradeEnvelope(structuredClone(value))
+  const index = envelope.revisions.findIndex((revision) => revision.id === revisionId)
+  if (index < 0) throw new Error(`Revision not found: ${revisionId}`)
+  envelope.revisions.splice(index, 1)
+  const timestamp = now.toISOString()
+  envelope.exportedAt = timestamp
+  envelope.quotation.metadata.updatedAt = timestamp
+  const resultWarnings = assertValidEnvelope(envelope, 'delete quotation revision')
+  return { envelope, warnings: [...new Set([...warnings, ...resultWarnings])] }
+}
+
 export function validateQuotationJsonContent(content) {
   if (typeof content !== 'string') {
     return { errors: ['Quotation JSON content must be a string.'], warnings: [] }
@@ -267,6 +420,7 @@ export function setPendingGoodsReceiptDraftInEnvelope(value, input, now = new Da
   if (existing.errors.length > 0) {
     throw new Error(`Cannot set goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
+  upgradeEnvelope(envelope)
 
   const warnings = [...existing.warnings]
   const timestamp = now.toISOString()
@@ -297,6 +451,7 @@ export function addGoodsReceiptToEnvelope(value, input, now = new Date()) {
   if (existing.errors.length > 0) {
     throw new Error(`Cannot add goods receipt to an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
+  upgradeEnvelope(envelope)
 
   const warnings = [...existing.warnings]
   const timestamp = now.toISOString()
@@ -342,6 +497,7 @@ export function clearPendingGoodsReceiptDraftInEnvelope(value, now = new Date())
   if (existing.errors.length > 0) {
     throw new Error(`Cannot clear goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
+  upgradeEnvelope(envelope)
 
   delete envelope.quotation.pendingGoodsReceiptDraft
   const timestamp = now.toISOString()
@@ -420,15 +576,18 @@ export function buildGoodsReceiptDraft(quotation, input, warnings = [], timestam
   const selectionPreset = goodsReceiptSelectionPresets.has(input.selectionPreset)
     ? input.selectionPreset
     : 'detailed'
-  if (input.selectionPreset === undefined) {
-    warnings.push('Goods-receipt line selection was missing; used detailed leaf lines at quoted quantities.')
-  } else if (!goodsReceiptSelectionPresets.has(input.selectionPreset)) {
-    warnings.push('Goods-receipt line selection was invalid; used detailed leaf lines at quoted quantities.')
-  }
-
   const lines = createGoodsReceiptLineDrafts(quotation.majorItems)
   applyGoodsReceiptSelectionPreset(lines, selectionPreset)
-  applyGoodsReceiptLineOverrides(lines, input.lines, warnings)
+  const explicitSelectionCount = applyGoodsReceiptLineOverrides(lines, input.lines, warnings)
+  if (input.selectionPreset === undefined && explicitSelectionCount < lines.length) {
+    warnings.push(explicitSelectionCount === 0
+      ? 'Goods-receipt line selection was missing; used detailed leaf lines at quoted quantities.'
+      : 'Goods-receipt line selection was missing for some lines; used detailed leaf selection for unspecified lines.')
+  } else if (input.selectionPreset !== undefined && !goodsReceiptSelectionPresets.has(input.selectionPreset)) {
+    warnings.push(explicitSelectionCount === lines.length
+      ? 'Goods-receipt line selection preset was invalid; used the explicit line selections.'
+      : 'Goods-receipt line selection was invalid; used detailed leaf selection for unspecified lines.')
+  }
 
   const supplierContact = [quotation.companyProfileSnapshot?.email, quotation.companyProfileSnapshot?.phone]
     .map((value) => text(value).trim())
@@ -674,8 +833,9 @@ function applyGoodsReceiptSelectionPreset(lines, preset) {
 }
 
 function applyGoodsReceiptLineOverrides(lines, value, warnings) {
-  if (value === undefined) return
+  if (value === undefined) return 0
   if (!Array.isArray(value)) throw new Error('Goods-receipt lines must be an array of line overrides.')
+  const explicitlySelectedLines = new Set()
 
   value.forEach((override, index) => {
     if (!isRecord(override)) throw new Error(`Goods-receipt line override ${index + 1} must be an object.`)
@@ -697,12 +857,16 @@ function applyGoodsReceiptLineOverrides(lines, value, warnings) {
     if (override.selected !== undefined && typeof override.selected !== 'boolean') {
       throw new Error(`Goods-receipt line override ${index + 1}.selected must be a boolean.`)
     }
-    if (typeof override.selected === 'boolean') line.selected = override.selected
+    if (typeof override.selected === 'boolean') {
+      line.selected = override.selected
+      explicitlySelectedLines.add(line)
+    }
     if (override.quantity !== undefined && !finiteNumber(override.quantity)) {
       throw new Error(`Goods-receipt line override ${index + 1}.quantity must be a number.`)
     }
     if (finiteNumber(override.quantity)) line.quantity = override.quantity
   })
+  return explicitlySelectedLines.size
 }
 
 function createGoodsReceiptNumber(documentDate) {
@@ -893,8 +1057,8 @@ function validateHeader(value, errors) {
     'quotationNumber', 'quotationDate', 'customerCompany', 'contactPerson', 'contactDetails',
     'projectName', 'validityPeriod', 'notes', 'terms',
   ]) if (typeof value[key] !== 'string') errors.push(`header.${key} must be a string.`)
-  if (!Number.isInteger(value.revisionNumber) || value.revisionNumber < 1) {
-    errors.push('header.revisionNumber must be a positive integer.')
+  if (!isPositiveSafeInteger(value.revisionNumber)) {
+    errors.push('header.revisionNumber must be a positive safe integer.')
   }
   if (!dateOnly(value.quotationDate)) errors.push('header.quotationDate must use YYYY-MM-DD.')
   if (!normalizeCurrency(value.currency)) errors.push('header.currency must be a three-letter currency code.')
@@ -1429,14 +1593,14 @@ function normalizeQuotationTemplateId(value) {
   return templates.has(value) ? value : 'classic'
 }
 
-function positiveInteger(value, fallback) { return Number.isInteger(value) && value > 0 ? value : fallback }
+function isPositiveSafeInteger(value) { return Number.isSafeInteger(value) && value > 0 }
 function finiteNumber(value) { return typeof value === 'number' && Number.isFinite(value) }
 function finiteNonNegative(value) { return finiteNumber(value) && value >= 0 }
 function nonEmpty(value) { return typeof value === 'string' && value.trim().length > 0 }
 function text(value) { return typeof value === 'string' ? value : '' }
 function isRecord(value) { return typeof value === 'object' && value !== null && !Array.isArray(value) }
 
-const usage = 'Usage: quotation-json.mjs build <partial.json> <quotation.json> | validate <quotation.json> | summarize <quotation.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | clear-goods-receipt-draft <quotation.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | self-test [output.json] [--json]'
+const usage = 'Usage: quotation-json.mjs build <partial.json> <quotation.json> | validate <quotation.json> | summarize <quotation.json> | list-revisions <quotation.json> | create-revision <quotation.json> <output.json> [--note text] | restore-revision <quotation.json> <revision-id> <output.json> | delete-revision <quotation.json> <revision-id> <output.json> | set-goods-receipt-draft <quotation.json> <receipt.json> <output-quotation.json> | clear-goods-receipt-draft <quotation.json> <output-quotation.json> | add-goods-receipt <quotation.json> <receipt.json> <output-quotation.json> | self-test [output.json] [--json]'
 
 async function main() {
   const [command, ...rawArgs] = process.argv.slice(2)
@@ -1447,6 +1611,40 @@ async function main() {
   const jsonOutput = rawArgs.includes('--json')
   const args = rawArgs.filter((argument) => argument !== '--json')
   if (command === 'self-test') return runSelfTest(args[0])
+  if (command === 'list-revisions') {
+    if (args.length !== 1) throw new Error('Usage: quotation-json.mjs list-revisions <quotation.json> [--json]')
+    const envelope = await readJsonFile(args[0])
+    const warnings = assertValidEnvelope(envelope, 'list revisions from an invalid quotation')
+    const revisions = listQuotationRevisions(envelope)
+    if (jsonOutput) {
+      process.stdout.write(`${JSON.stringify({ ok: true, errorCount: 0, warningCount: warnings.length, ...(warnings.length ? { warnings } : {}), revisions })}\n`)
+    } else {
+      process.stdout.write(`${JSON.stringify(revisions, null, 2)}\n`)
+    }
+    return
+  }
+  if (['create-revision', 'restore-revision', 'delete-revision'].includes(command)) {
+    let note
+    if (command === 'create-revision') {
+      const noteIndex = args.indexOf('--note')
+      if (noteIndex !== -1) {
+        if (args[noteIndex + 1] === undefined || args[noteIndex + 1].startsWith('--')) throw new Error('--note requires text.')
+        note = args.splice(noteIndex, 2)[1]
+      }
+    }
+    if (args.some((argument) => argument.startsWith('--'))
+      || args.length !== (command === 'create-revision' ? 2 : 3)) throw new Error(usage)
+    const input = await readJsonFile(args[0])
+    const outputPath = args.at(-1)
+    const { envelope, warnings } = command === 'create-revision'
+      ? createQuotationRevisionInEnvelope(input, { note })
+      : command === 'restore-revision'
+        ? restoreQuotationRevisionInEnvelope(input, args[1])
+        : deleteQuotationRevisionFromEnvelope(input, args[1])
+    await writeQuotationFile(outputPath, envelope)
+    printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
+    return
+  }
   if (command === 'set-goods-receipt-draft') {
     const [quotationPath, receiptPath, outputPath] = args
     if (!quotationPath || !receiptPath || !outputPath) {
@@ -1455,7 +1653,7 @@ async function main() {
     const quotationInput = await readJsonFile(quotationPath)
     const receiptInput = await readJsonFile(receiptPath)
     const { envelope, warnings } = setPendingGoodsReceiptDraftInEnvelope(quotationInput, receiptInput)
-    await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
+    await writeQuotationFile(outputPath, envelope)
     printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
     return
   }
@@ -1466,7 +1664,7 @@ async function main() {
     }
     const quotationInput = await readJsonFile(quotationPath)
     const { envelope, warnings } = clearPendingGoodsReceiptDraftInEnvelope(quotationInput)
-    await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
+    await writeQuotationFile(outputPath, envelope)
     printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
     return
   }
@@ -1478,7 +1676,7 @@ async function main() {
     const quotationInput = await readJsonFile(quotationPath)
     const receiptInput = await readJsonFile(receiptPath)
     const { envelope, warnings } = addGoodsReceiptToEnvelope(quotationInput, receiptInput)
-    await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
+    await writeQuotationFile(outputPath, envelope)
     printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
     return
   }
@@ -1501,12 +1699,23 @@ async function main() {
   }
   const input = await readJsonFile(inputPath)
   const { envelope, warnings } = buildQuotationEnvelope(input)
-  await writeFile(resolve(outputPath), `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
+  await writeQuotationFile(outputPath, envelope)
   printResult({ errors: [], warnings, outputPath: resolve(outputPath) }, jsonOutput)
 }
 
 async function readJsonFile(filePath) {
-  return JSON.parse((await readFile(resolve(filePath), 'utf8')).replace(/^\uFEFF/, ''))
+  const content = await readFile(resolve(filePath), 'utf8')
+  if (getUtf8ByteLength(content) > automationLimits.quotationJsonBytes) {
+    throw new Error(`Quotation JSON exceeds the ${automationLimits.quotationJsonBytes} byte limit.`)
+  }
+  return JSON.parse(content.replace(/^\uFEFF/, ''))
+}
+
+async function writeQuotationFile(filePath, envelope) {
+  const content = `${JSON.stringify(envelope, null, 2)}\n`
+  const result = validateQuotationJsonContent(content)
+  if (result.errors.length) throw new Error(`Cannot write quotation:\n- ${result.errors.join('\n- ')}`)
+  await writeFile(resolve(filePath), content, 'utf8')
 }
 
 function printResult({ errors, warnings, outputPath }, jsonOutput = false) {

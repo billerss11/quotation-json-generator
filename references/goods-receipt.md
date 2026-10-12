@@ -1,6 +1,6 @@
 # Goods-receipt draft and history schema
 
-The application source of truth is `src/features/goods-receipts/utils/goodsReceipt.ts`. Both pending and completed goods receipts are stored inside the same schema-v2 quotation JSON.
+The application source of truth is `src/features/goods-receipts/utils/goodsReceipt.ts`. Pending and completed receipts live inside the working `quotation` in the schema-v3 envelope. Receipt helper commands preserve all saved quotation revisions exactly and upgrade legacy-v2 envelopes to v3.
 
 ## Lifecycle
 
@@ -9,6 +9,7 @@ The application source of truth is `src/features/goods-receipts/utils/goodsRecei
 - Browser Print does not add history and leaves the pending draft unchanged.
 - Changes made only inside the open dialog are not written back to the pending draft. If the user closes the dialog without direct export, the imported pending draft remains unchanged.
 - After direct export, the user must save or export the quotation JSON again to update a file on disk.
+- Restoring a quotation revision retains the current completed receipt history and clears the pending receipt draft. It does not roll completed receipts back to the selected snapshot. Saved quotation snapshots keep their original receipt data.
 
 ## Pending draft
 

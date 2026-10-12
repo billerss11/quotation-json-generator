@@ -1,13 +1,16 @@
 # GUI-to-JSON parity map
 
-The automation contract is the complete schema-v2 quotation state, not a command-line flag for every GUI control. Compose these fields so importing the JSON produces the same document-affecting state a user could enter in the GUI.
+The automation contract is the complete schema-v3 envelope: the working quotation plus its saved revision history. Compose these fields so importing JSON produces the requested document and preserves existing archives.
 
 | GUI area | JSON path | Notes |
 | --- | --- | --- |
 | Seller/company profile | `quotation.companyProfileId`, `quotation.companyProfileSnapshot` | The snapshot controls the document. A library selection itself is not required. |
 | Logo and accent color | `quotation.branding.logoDataUrl`, `quotation.branding.accentColor` | Logo is a base64 image data URL; accent is a six-digit hex color. |
-| Template | `quotation.templateId` | Use one of the seven quotation templates in `schema-v2.md`, including `spreadsheet`. |
-| Quotation identity | `quotation.header.quotationNumber`, `revisionNumber`, `quotationDate` | Revision is a positive integer; date is `YYYY-MM-DD`. |
+| Template | `quotation.templateId` | Use one of the seven quotation templates in `schema-v3.md`, including `spreadsheet`. |
+| Quotation identity | `quotation.id`, `quotation.header.quotationNumber`, `revisionNumber`, `quotationDate` | Keep the family ID stable. Revision is a positive safe integer managed by revision operations; date is `YYYY-MM-DD`. |
+| Revision history | Envelope `revisions` | Immutable quotation snapshots with unique archive IDs, numbers, timestamps, and optional notes. Never place history inside `quotation`. |
+| Revision selector / View revision | No working-draft change | Read the selected saved snapshot. Switching views does not restore or increment a revision. |
+| Create / Restore / Delete revision | Revision helper or matching V2 operation | See `revisions.md`; do not emulate these by editing the number field. Deleting does not renumber remaining revisions. |
 | Customer and contact | `quotation.header.customerCompany`, `contactPerson`, `contactDetails` | Preserve distinct company/person/contact meanings. |
 | Project and commercial text | `quotation.header.projectName`, `validityPeriod`, `notes`, `terms` | Keep receipt-only delivery data out of these fields. |
 | Currency and language | `quotation.header.currency`, `documentLocale` | Locale is `en-US` or `zh-CN`; base exchange rate is `1`. |
