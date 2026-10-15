@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "I do not have the quotation software on this computer. Create an import-ready USD quotation JSON for two PX-100 pumps at USD 1200 each, manual selling price USD 1500, customer Acme Marine, quotation Q-2026-101. Do not make PDF.",
-      "expected_output": "A validated schema-v3 quotation JSON is delivered without requiring or attempting to use Quotation Software.",
+      "expected_output": "A validated schema-v4 quotation JSON is delivered without requiring or attempting to use Quotation Software.",
       "files": [],
       "expectations": [
         "The final quotation JSON passes the bundled validator.",
@@ -39,7 +39,7 @@
     {
       "id": 4,
       "prompt": "Create an import-ready quotation using the spreadsheet template. If my quotation editor is already open, import it through the current programmatic API and validate it for quotation PDF export.",
-      "expected_output": "The generated schema-v3 JSON preserves templateId spreadsheet, passes offline validation, and uses quotationAgentV2 with export preflight when an open editor is available.",
+      "expected_output": "The generated schema-v4 JSON preserves templateId spreadsheet, passes offline validation, and uses quotationAgentV2 with export preflight when an open editor is available.",
       "files": [],
       "expectations": [
         "The final JSON contains quotation.templateId set to spreadsheet rather than classic.",
@@ -50,7 +50,7 @@
     {
       "id": 5,
       "prompt": "Update the working quotation validity to 60 days. Keep all existing saved revisions unchanged; do not create a new revision. I only need JSON.",
-      "expected_output": "A valid schema-v3 JSON with changed working validity and byte-equivalent saved revision data.",
+      "expected_output": "A valid schema-v4 JSON with changed working validity and exact decoded saved revision data and original image strings.",
       "files": [
         "evals/fixtures/quotation-with-revisions.json"
       ],
@@ -102,7 +102,7 @@
     {
       "id": 9,
       "prompt": "Render this quotation with history using my configured app. Its api-info reports API 2.0.0 and quotationSchemaVersion 2. Do not change any quotation data.",
-      "expected_output": "The skill retains validated schema-v3 JSON and reports the app compatibility blocker without removing history or claiming a PDF.",
+      "expected_output": "The skill retains validated schema-v4 JSON and reports the app compatibility blocker without removing history or claiming a PDF.",
       "files": [
         "evals/fixtures/quotation-with-revisions.json"
       ],

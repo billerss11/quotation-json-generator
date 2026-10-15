@@ -9,6 +9,8 @@ import { calculationCases, createCalculationInput } from './calculation-cases.mj
 
 import {
   automationLimits,
+  decodeQuotationEnvelope,
+  encodeQuotationEnvelope,
   addGoodsReceiptToEnvelope,
   buildQuotationEnvelope,
   clearPendingGoodsReceiptDraftInEnvelope,
@@ -23,6 +25,217 @@ import {
 } from './quotation-json.mjs'
 
 const now = new Date('2026-08-26T08:00:00.000Z')
+
+test('builds optional summary settings with fresh row IDs without changing the default output or summary shape', () => {
+  const original = createEnvelope()
+  assert.deepEqual(original.quotation.outputSettings, { itemDetailLevel: 3 })
+  assert.equal(Object.hasOwn(summarizeQuotationEnvelope(original), 'summaryDisplay'), false)
+  const settings = {
+    subtotalLabel: ' Materials subtotal ', showInformationalTotals: false,
+    informationalTotals: [{ label: ' Equipment ', source: 'items', sectionIds: ['inactive', 'inactive'], itemIds: ['missing', 'missing'], visible: false }],
+  }
+  const before = structuredClone(settings)
+  const envelope = createEnvelope({ outputSettings: settings })
+  const row = envelope.quotation.outputSettings.informationalTotals[0]
+  assert.ok(row.id)
+  assert.deepEqual(row, { id: row.id, label: ' Equipment ', source: 'items', sectionIds: ['inactive'], itemIds: ['missing'], visible: false })
+  assert.equal(envelope.quotation.outputSettings.subtotalLabel, ' Materials subtotal ')
+  assert.deepEqual(settings, before)
+  assert.deepEqual(validateQuotationEnvelope(envelope).errors, [])
+  const display = summarizeQuotationEnvelope(envelope).summaryDisplay
+  assert.equal(display.subtotalLabel, 'Materials subtotal')
+  assert.equal(Object.hasOwn(display, 'informationalTotalsNote'), false)
+  assert.equal(display.showInformationalTotals, false)
+  assert.equal(display.informationalTotals[0].isVisible, false)
+  assert.equal(display.informationalTotals[0].amount, null)
+  assert.deepEqual(display.informationalTotals[0].missingSectionIds, [])
+  assert.deepEqual(display.informationalTotals[0].missingItemIds, ['missing'])
+  const partialRow = createEnvelope({ outputSettings: { informationalTotals: [{}] } }).quotation.outputSettings.informationalTotals[0]
+  assert.deepEqual(partialRow, { id: partialRow.id, label: '', sectionIds: [], visible: true })
+})
+
+test('preserves custom multiline and explicitly blank informational notes without changing pricing or absent-note defaults', () => {
+  const original = createEnvelope()
+  const baseline = summarizeQuotationEnvelope(original)
+  assert.equal(Object.hasOwn(original.quotation.outputSettings, 'informationalTotalsNote'), false)
+  for (const note of ['  Included in the subtotal.\n仅供参考。  ', '', '  \n\t  ']) {
+    const envelope = createEnvelope({ outputSettings: { informationalTotalsNote: note } })
+    const before = structuredClone(envelope)
+    assert.equal(envelope.quotation.outputSettings.informationalTotalsNote, note)
+    assert.deepEqual(validateQuotationEnvelope(envelope).errors, [])
+    const { summaryDisplay, ...financialSummary } = summarizeQuotationEnvelope(envelope)
+    assert.equal(summaryDisplay.informationalTotalsNote, note)
+    assert.deepEqual(financialSummary, baseline)
+    assert.deepEqual(envelope, before)
+    assert.equal(buildQuotationEnvelope(envelope, now).envelope.quotation.outputSettings.informationalTotalsNote, note)
+  }
+})
+
+test('rejects non-string informational notes in the builder and in working or saved quotation validation', () => {
+  for (const note of [null, 42, false, [], {}]) {
+    assert.throws(() => createEnvelope({ outputSettings: { informationalTotalsNote: note } }), /informationalTotalsNote must be a string/)
+    const envelope = createEnvelope()
+    envelope.quotation.outputSettings.informationalTotalsNote = note
+    assert.ok(validateQuotationEnvelope(envelope).errors.some(error => error.includes('informationalTotalsNote must be a string')))
+    const history = createQuotationRevisionInEnvelope(createEnvelope(), {}, now).envelope
+    history.revisions[0].quotation.outputSettings.informationalTotalsNote = note
+    assert.ok(validateQuotationEnvelope(history).errors.some(error => error.includes('informationalTotalsNote must be a string')))
+    assert.throws(() => buildQuotationEnvelope(history, now), /informationalTotalsNote must be a string/)
+  }
+})
+
+test('summarizes sections and item unions with canonical nested pricing without adding informational totals to tax or grand total', () => {
+  const envelope = createEnvelope({
+    majorItems: [
+      { id: 'orphan', name: 'Outside sections', unitCost: 100 },
+      { id: 'equipment', kind: 'section_header', title: 'Equipment' },
+      { id: 'package', name: 'Package', quantity: 2, markupRate: 25, children: [
+        { id: 'assembly', name: 'Assembly', quantity: 3, children: [
+          { id: 'fx', name: 'Imported part', quantity: 2, unitCost: 10, costCurrency: 'EUR' },
+          { id: 'manual', name: 'Manual part', quantity: 1, pricingMethod: 'manual_price', manualUnitPrice: 7 },
+        ] },
+      ] },
+      { id: 'piping', kind: 'section_header', title: 'Piping' },
+      { id: 'pipe', name: 'Pipe', quantity: 2, pricingMethod: 'manual_price', manualUnitPrice: 50 },
+    ],
+    exchangeRates: { USD: 1, EUR: 1.2 },
+    totalsConfig: { globalMarkupRate: 10, extraCharges: [{ id: 'install', label: 'Installation', amount: 200 }] },
+    outputSettings: {
+      itemDetailLevel: 1, subtotalLabel: 'Materials subtotal', showInformationalTotals: true,
+      informationalTotals: [
+        { id: 'sections', label: '', sectionIds: ['equipment', 'piping', 'equipment'], visible: true },
+        { id: 'leaves', label: '', sectionIds: ['inactive-deleted-section'], source: 'items', itemIds: ['fx', 'manual', 'fx'], visible: true },
+        { id: 'parent', label: '', sectionIds: [], source: 'items', itemIds: ['fx', 'package', 'assembly', 'manual'], visible: true },
+        { id: 'part', label: ' Imported price ', sectionIds: [], source: 'items', itemIds: ['fx'], visible: true },
+      ],
+    },
+  })
+  const before = structuredClone(envelope)
+  const summary = summarizeQuotationEnvelope(envelope)
+  assert.equal(summary.subtotalAfterMarkup, 432)
+  assert.equal(summary.taxAmount, 0)
+  assert.equal(summary.grandTotal, 632)
+  assert.deepEqual(summary.summaryDisplay.informationalTotals.map((row) => [row.label, row.amount]), [
+    ['Equipment + Piping', 322], ['Imported part + Manual part', 222], ['Package', 222], ['Imported price', 180],
+  ])
+  assert.equal(validateQuotationEnvelope(envelope).warnings.some((warning) => warning.startsWith('outputSettings')), false)
+  assert.deepEqual(envelope, before)
+})
+
+test('reports only active visible missing sources as warnings and never presents partial informational amounts', () => {
+  const envelope = createEnvelope({
+    majorItems: [{ id: 'pump', name: 'Pump', quantity: 1, unitCost: 100 }],
+    outputSettings: {
+      showInformationalTotals: true, informationalTotals: [
+        { id: 'items', label: '', sectionIds: ['inactive-section'], source: 'items', itemIds: ['pump', 'deleted', 'deleted'], visible: true },
+        { id: 'hidden', label: '', sectionIds: ['hidden-section'], source: 'items', itemIds: ['hidden-item'], visible: false },
+        { id: 'empty', label: '', sectionIds: [], source: 'items', itemIds: [], visible: true },
+      ],
+    },
+  })
+  const result = validateQuotationEnvelope(envelope)
+  assert.deepEqual(result.errors, [])
+  const displayWarnings = result.warnings.filter((warning) => warning.startsWith('outputSettings'))
+  assert.equal(displayWarnings.length, 2)
+  assert.match(displayWarnings[0], /itemIds.*deleted/)
+  assert.match(displayWarnings[1], /itemIds.*no items/)
+  assert.ok(displayWarnings.every((warning) => !/inactive-section|hidden-item|hidden-section/.test(warning)))
+  const rows = summarizeQuotationEnvelope(envelope).summaryDisplay.informationalTotals
+  assert.equal(rows[0].amount, null)
+  assert.deepEqual(rows[0].missingItemIds, ['deleted'])
+  assert.deepEqual(rows[0].missingSectionIds, [])
+  assert.equal(rows[2].amount, null)
+  envelope.quotation.outputSettings.showInformationalTotals = false
+  assert.equal(validateQuotationEnvelope(envelope).warnings.some((warning) => warning.startsWith('outputSettings')), false)
+  envelope.quotation.outputSettings.showInformationalTotals = true
+  envelope.quotation.outputSettings.informationalTotals = [{ id: 'sections', label: '', sectionIds: ['deleted-section'], itemIds: ['inactive-item'], visible: true }]
+  const sectionResult = validateQuotationEnvelope(envelope)
+  assert.deepEqual(sectionResult.errors, [])
+  assert.ok(sectionResult.warnings.some((warning) => /sectionIds.*deleted-section/.test(warning)))
+  assert.ok(sectionResult.warnings.every((warning) => !warning.includes('inactive-item')))
+})
+
+test('retains deterministic nested fractional cent allocations independently of selected items', () => {
+  for (const { majorItems, leafIds, amount, firstAmount } of [
+    {
+      majorItems: [{ id: 'root', name: 'Root', quantity: 1.25, children: [{ id: 'group', name: 'Group', quantity: 1.25, children: [
+        { id: 'a', name: 'A', pricingMethod: 'manual_price', manualUnitPrice: 0.01 },
+        { id: 'b', name: 'B', pricingMethod: 'manual_price', manualUnitPrice: 0.03 },
+      ] }] }], leafIds: ['a', 'b'], amount: 0.06, firstAmount: 0.01,
+    },
+    {
+      majorItems: [{ id: 'root', name: 'Root', quantity: 0.25, children: [
+        { id: 'first', name: 'First', pricingMethod: 'manual_price', manualUnitPrice: 0.01 },
+        { id: 'group', name: 'Group', quantity: 0.25, children: [
+          { id: 'a', name: 'A', pricingMethod: 'manual_price', manualUnitPrice: 0.01 },
+          { id: 'b', name: 'B', pricingMethod: 'manual_price', manualUnitPrice: 0.01 },
+        ] },
+      ] }], leafIds: ['first', 'a', 'b'], amount: 0.01, firstAmount: 0,
+    },
+  ]) {
+    const envelope = createEnvelope({ majorItems, outputSettings: { showInformationalTotals: true, informationalTotals: [
+      { id: 'all', label: '', source: 'items', sectionIds: [], itemIds: leafIds, visible: true },
+      { id: 'one', label: '', source: 'items', sectionIds: [], itemIds: [leafIds[0]], visible: true },
+    ] } })
+    const summary = summarizeQuotationEnvelope(envelope)
+    assert.equal(summary.subtotalAfterMarkup, amount)
+    assert.deepEqual(summary.summaryDisplay.informationalTotals.map((row) => row.amount), [amount, firstAmount])
+    envelope.quotation.outputSettings.informationalTotals[0].itemIds = ['root', ...leafIds]
+    assert.equal(summarizeQuotationEnvelope(envelope).summaryDisplay.informationalTotals[0].amount, amount)
+  }
+})
+
+test('strictly rejects malformed, duplicate, or unknown summary settings rather than silently repairing supplied data', () => {
+  const mutations = [
+    (value) => { value.subtotalLabel = 42 },
+    (value) => { value.showInformationalTotals = 'true' },
+    (value) => { value.informationalTotals = {} },
+    (value) => { value.unknown = true },
+    (value) => { value.informationalTotals[0].source = 'unknown' },
+    (value) => { value.informationalTotals[0].itemIds = [null] },
+    (value) => { value.informationalTotals[0].sectionIds = 'section' },
+    (value) => { value.informationalTotals[0].visible = 'true' },
+    (value) => { value.informationalTotals[0].label = 42 },
+    (value) => { value.informationalTotals[0].amount = 100 },
+    (value) => { value.informationalTotals.push(structuredClone(value.informationalTotals[0])) },
+  ]
+  for (const mutate of mutations) {
+    const settings = { itemDetailLevel: 1, informationalTotals: [{ id: 'row', label: '', sectionIds: [], visible: false }] }
+    mutate(settings)
+    assert.throws(() => createEnvelope({ outputSettings: settings }), /outputSettings|informational total ID/)
+    const envelope = createEnvelope()
+    envelope.quotation.outputSettings = settings
+    assert.ok(validateQuotationEnvelope(envelope).errors.length, mutate.toString())
+  }
+})
+
+test('rebuilds working summary settings while preserving archived settings and missing references byte for byte', () => {
+  const original = createEnvelope({ outputSettings: {
+    itemDetailLevel: 1, subtotalLabel: ' Saved label ', showInformationalTotals: false,
+    informationalTotalsNote: '  Saved reminder.\n保存的说明。  ',
+    informationalTotals: [{ id: 'saved', label: ' Saved row ', source: 'items', sectionIds: ['inactive'], itemIds: ['deleted'], visible: true }],
+  } })
+  const current = createQuotationRevisionInEnvelope(original, {}, now).envelope
+  current.quotation.outputSettings.subtotalLabel = 'Working label'
+  current.quotation.outputSettings.informationalTotalsNote = ''
+  current.quotation.outputSettings.informationalTotals.push({ id: 'new', label: '', sectionIds: [], visible: false })
+  const before = structuredClone(current)
+  const archived = JSON.stringify(current.revisions)
+  const rebuilt = buildQuotationEnvelope(current, now).envelope
+  assert.equal(JSON.stringify(rebuilt.revisions), archived)
+  assert.equal(rebuilt.quotation.outputSettings.subtotalLabel, 'Working label')
+  assert.equal(rebuilt.revisions[0].quotation.outputSettings.subtotalLabel, ' Saved label ')
+  assert.equal(rebuilt.quotation.outputSettings.informationalTotalsNote, '')
+  assert.equal(rebuilt.revisions[0].quotation.outputSettings.informationalTotalsNote, original.quotation.outputSettings.informationalTotalsNote)
+  const restored = restoreQuotationRevisionInEnvelope(rebuilt, rebuilt.revisions[0].id, now).envelope
+  assert.equal(restored.quotation.outputSettings.informationalTotalsNote, original.quotation.outputSettings.informationalTotalsNote)
+  assert.equal(restored.revisions.at(-1).quotation.outputSettings.informationalTotalsNote, '')
+  assert.deepEqual(current, before)
+  const invalid = structuredClone(current)
+  invalid.revisions[0].quotation.outputSettings.informationalTotals[0].source = 'invalid'
+  assert.throws(() => buildQuotationEnvelope(invalid, now), /Cannot build quotation/)
+  assert.deepEqual(JSON.stringify(current.revisions), archived)
+})
 
 for (const { name, input, grandTotal } of calculationCases) {
   test(name, () => {
@@ -128,12 +341,105 @@ test('validates logo bytes, MIME type, and dimensions', () => {
   assert.deepEqual(validateQuotationEnvelope(valid).errors, [])
 
   const wrongMime = structuredClone(valid)
-  wrongMime.quotation.branding.logoDataUrl = createPngDataUrl(64, 32, 'image/jpeg')
+  wrongMime.images[wrongMime.quotation.branding.logoImageId] = createPngDataUrl(64, 32, 'image/jpeg')
   assert.ok(validateQuotationEnvelope(wrongMime).errors.some(error => error.includes('MIME type')))
 
   const tooWide = structuredClone(valid)
-  tooWide.quotation.branding.logoDataUrl = createPngDataUrl(automationLimits.logoDimensionPixels + 1, 32)
+  tooWide.images[tooWide.quotation.branding.logoImageId] = createPngDataUrl(automationLimits.logoDimensionPixels + 1, 32)
   assert.ok(validateQuotationEnvelope(tooWide).errors.some(error => error.includes('dimensions')))
+})
+
+test('shares exact logo strings across v3 history without changing snapshot values or input', () => {
+  const firstLogo = createPngDataUrl(64, 32)
+  const secondLogo = createPngDataUrl(32, 32)
+  const source = decodeQuotationEnvelope(createEnvelope({ branding: { logoDataUrl: firstLogo, accentColor: '#047857' } }))
+  source.quotation.header.revisionNumber = 4
+  source.revisions = [1, 2, 3].map((number) => {
+    const quotation = structuredClone(source.quotation)
+    quotation.header.revisionNumber = number
+    quotation.branding.logoDataUrl = number === 2 ? secondLogo : number === 3 ? '' : firstLogo
+    return { id: `saved-${number}`, revisionNumber: number, createdAt: now.toISOString(), note: `  Snapshot ${number}\n原始版本  `, quotation }
+  })
+  const before = structuredClone(source)
+  const built = buildQuotationEnvelope(source, now).envelope
+  assert.equal(built.schemaVersion, 4)
+  assert.deepEqual(built.images, { 'image-1': firstLogo, 'image-2': secondLogo })
+  assert.deepEqual(built.revisions.map(({ quotation }) => quotation.branding.logoImageId), ['image-1', 'image-2', null])
+  assert.ok(!JSON.stringify(built).includes('logoDataUrl'))
+  assert.deepEqual(decodeQuotationEnvelope(built).revisions, before.revisions)
+  assert.deepEqual(source, before)
+  assert.deepEqual(encodeQuotationEnvelope(built), built)
+  assert.deepEqual(summarizeQuotationEnvelope(built), summarizeQuotationEnvelope(source))
+  const created = createQuotationRevisionInEnvelope(built, {}, now).envelope
+  assert.deepEqual(decodeQuotationEnvelope(created).revisions.slice(0, 3), before.revisions)
+  assert.deepEqual(decodeQuotationEnvelope(created).revisions[3].quotation, before.quotation)
+  const restored = restoreQuotationRevisionInEnvelope(created, 'saved-2', now).envelope
+  assert.equal(decodeQuotationEnvelope(restored).quotation.branding.logoDataUrl, secondLogo)
+  assert.deepEqual(decodeQuotationEnvelope(restored).revisions.slice(0, 3), before.revisions)
+  const deleted = deleteQuotationRevisionFromEnvelope(built, 'saved-2', now).envelope
+  assert.deepEqual(deleted.images, { 'image-1': firstLogo })
+  assert.deepEqual(decodeQuotationEnvelope(deleted).revisions, before.revisions.filter(({ id }) => id !== 'saved-2'))
+  for (const changed of [
+    setPendingGoodsReceiptDraftInEnvelope(built, {}, now).envelope,
+    clearPendingGoodsReceiptDraftInEnvelope(built, now).envelope,
+    addGoodsReceiptToEnvelope(built, { filePath: 'receipt.pdf' }, now).envelope,
+  ]) {
+    assert.equal(changed.schemaVersion, 4)
+    assert.deepEqual(decodeQuotationEnvelope(changed).revisions, before.revisions)
+    assert.deepEqual(validateQuotationEnvelope(changed).errors, [])
+  }
+})
+
+test('rejects malformed shared images, missing references and inline/reference mixtures', () => {
+  const valid = createEnvelope({ branding: { logoDataUrl: createPngDataUrl(64, 32), accentColor: '#047857' } })
+  for (const mutate of [
+    value => { delete value.images },
+    value => { value.images = [] },
+    value => { value.images['image-0'] = value.images['image-1'] },
+    value => { value.images['image-2'] = '' },
+    value => { value.images['image-2'] = 42 },
+    value => { value.images['image-2'] = 'data:image/png;base64,invalid' },
+    value => { value.quotation.branding.logoImageId = 'image-2' },
+    value => { value.quotation.branding.logoImageId = '__proto__' },
+    value => { value.quotation.branding.logoImageId = 1 },
+    value => { delete value.quotation.branding.logoImageId },
+    value => { value.quotation.branding.logoDataUrl = value.images['image-1'] },
+  ]) {
+    const invalid = structuredClone(valid)
+    mutate(invalid)
+    const before = JSON.stringify(invalid)
+    assert.ok(validateQuotationEnvelope(invalid).errors.length > 0)
+    assert.throws(() => buildQuotationEnvelope(invalid, now))
+    assert.throws(() => createQuotationRevisionInEnvelope(invalid, {}, now))
+    assert.equal(JSON.stringify(invalid), before)
+  }
+  const inherited = structuredClone(valid)
+  inherited.images = Object.create({ 'image-1': valid.images['image-1'] })
+  assert.throws(() => decodeQuotationEnvelope(inherited), /existing image/)
+  const mixedLegacy = decodeQuotationEnvelope(valid)
+  mixedLegacy.quotation.branding.logoImageId = 'image-1'
+  assert.throws(() => buildQuotationEnvelope(mixedLegacy, now), /mix inline/)
+  const unused = structuredClone(valid)
+  unused.images['image-9'] = createPngDataUrl(1, 1)
+  assert.deepEqual(validateQuotationEnvelope(unused).errors, [])
+  assert.deepEqual(encodeQuotationEnvelope(unused).images, valid.images)
+})
+
+test('limits stored v4 bytes while allowing decoded repeated images to exceed the limit', () => {
+  const logo = createPngDataUrl(64, 32)
+  const imageBytes = Buffer.concat([Buffer.from(logo.split(',')[1], 'base64'), Buffer.alloc(1024 * 1024)])
+  const largeLogo = `data:image/png;base64,${imageBytes.toString('base64')}`
+  let envelope = createEnvelope({ branding: { logoDataUrl: largeLogo, accentColor: '#047857' } })
+  for (let index = 0; index < 9; index++) envelope = createQuotationRevisionInEnvelope(envelope, {}, now).envelope
+  assert.equal(Object.keys(envelope.images).length, 1)
+  assert.ok(Buffer.byteLength(JSON.stringify(decodeQuotationEnvelope(envelope))) > automationLimits.quotationJsonBytes)
+  assert.ok(Buffer.byteLength(JSON.stringify(envelope)) < automationLimits.quotationJsonBytes)
+  assert.deepEqual(validateQuotationJsonContent(JSON.stringify(envelope)).errors, [])
+  assert.deepEqual(validateQuotationEnvelope(buildQuotationEnvelope(envelope, now).envelope).errors, [])
+  assert.deepEqual(validateQuotationEnvelope(setPendingGoodsReceiptDraftInEnvelope(envelope, {}, now).envelope).errors, [])
+  const overLimit = structuredClone(envelope)
+  overLimit.quotation.header.notes = 'x'.repeat(automationLimits.quotationJsonBytes)
+  assert.ok(validateQuotationEnvelope(overLimit).errors.some(error => error.includes('Quotation JSON exceeds')))
 })
 
 test('enforces quotation and pending goods-receipt byte limits', () => {
@@ -223,12 +529,12 @@ test('receipt selection defaults are disclosed only for lines without explicit s
   assert.equal(partial.envelope.quotation.pendingGoodsReceiptDraft.lines[1].selected, true)
 })
 
-test('build defaults to schema 3 and upgrades legacy files without inventing archives', () => {
+test('build defaults to schema 4 and upgrades legacy files without inventing archives', () => {
   const original = createEnvelope()
-  assert.equal(original.schemaVersion, 3)
+  assert.equal(original.schemaVersion, 4)
   assert.deepEqual(original.revisions, [])
   for (const schemaVersion of [1, 2]) {
-    const legacy = { ...structuredClone(original), schemaVersion }
+    const legacy = { ...decodeQuotationEnvelope(original), schemaVersion }
     delete legacy.revisions
     if (schemaVersion === 2) assert.deepEqual(validateQuotationEnvelope(legacy).errors, [])
     const before = structuredClone(legacy)
@@ -244,7 +550,7 @@ test('create freezes the working quotation, advances once, and returns detached 
   const before = structuredClone(original)
   const later = new Date('2026-08-26T09:00:00.000Z')
   const { envelope } = createQuotationRevisionInEnvelope(original, { note: '  Sent to customer  ' }, later)
-  assert.equal(envelope.schemaVersion, 3)
+  assert.equal(envelope.schemaVersion, 4)
   assert.equal(envelope.quotation.id, before.quotation.id)
   assert.equal(envelope.quotation.header.revisionNumber, 2)
   assert.equal(envelope.quotation.metadata.createdAt, before.quotation.metadata.createdAt)
@@ -353,8 +659,8 @@ test('build fills a new working row in schema 3 without changing saved history o
   }
 })
 
-test('all receipt mutations and revision creation upgrade valid legacy schema 2 to schema 3', () => {
-  const legacy = createEnvelope()
+test('all receipt mutations and revision creation upgrade valid legacy schema 2 to schema 4', () => {
+  const legacy = decodeQuotationEnvelope(createEnvelope())
   legacy.schemaVersion = 2
   delete legacy.revisions
   const before = structuredClone(legacy)
@@ -364,7 +670,7 @@ test('all receipt mutations and revision creation upgrade valid legacy schema 2 
     addGoodsReceiptToEnvelope(legacy, { filePath: 'C:\\receipt.pdf' }, now).envelope,
     createQuotationRevisionInEnvelope(legacy, {}, now).envelope,
   ]) {
-    assert.equal(envelope.schemaVersion, 3)
+    assert.equal(envelope.schemaVersion, 4)
     assert.ok(Array.isArray(envelope.revisions))
     assert.equal(envelope.quotation.id, legacy.quotation.id)
     assert.deepEqual(validateQuotationEnvelope(envelope).errors, [])

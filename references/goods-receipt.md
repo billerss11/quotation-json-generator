@@ -1,6 +1,6 @@
 # Goods-receipt draft and history schema
 
-The application source of truth is `src/features/goods-receipts/utils/goodsReceipt.ts`. Pending and completed receipts live inside the working `quotation` in the schema-v3 envelope. Receipt helper commands preserve all saved quotation revisions exactly and upgrade legacy-v2 envelopes to v3.
+The application source of truth is `src/features/goods-receipts/utils/goodsReceipt.ts`. Pending and completed receipts live inside the working `quotation` in the schema-v4 envelope. Receipt helper commands preserve all saved quotation revisions exactly and upgrade legacy-v2/v3 envelopes to v4 with shared images.
 
 ## Lifecycle
 

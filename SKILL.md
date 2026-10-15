@@ -1,16 +1,16 @@
 ---
 name: quotation-json-generator
-description: Create or update import-ready Quotation Software JSON from prose, images, PDFs, or tables, preserving schema-v3 revision history. Create, restore, or delete requested revisions, prepare goods receipts, and export PDFs through a compatible configured app. Use for quotation or goods-receipt authoring, revision management, validation, or rendering; not unrelated JSON.
+description: Create or update import-ready Quotation Software JSON from prose, images, PDFs, or tables, preserving schema-v4 revision history. Create, restore, or delete requested revisions, prepare goods receipts, and export PDFs through a compatible configured app. Use for quotation or goods-receipt authoring, revision management, validation, or rendering; not unrelated JSON.
 ---
 
 # Quotation JSON Generator
 
-Create a complete schema-v3 quotation JSON that works independently of Quotation Software. PDF export and application validation are optional enhancements and must never block JSON generation. The envelope contains a working `quotation` and a separate `revisions` array; new quotations start with empty history.
+Create a complete schema-v4 quotation JSON that works independently of Quotation Software. PDF export and application validation are optional enhancements and must never block JSON generation. The envelope contains a working `quotation`, a separate `revisions` array, and one `images` table shared by all versions; new quotations start with empty history.
 
 ## Load only what the request needs
 
 - Images, scans, PDFs, or copied tables: read [references/extraction-guide.md](references/extraction-guide.md).
-- Nested groups, manual prices, multiple currencies, taxes, extra charges, section headers, or unfamiliar fields: read [references/schema-v3.md](references/schema-v3.md).
+- Nested groups, manual prices, currencies, taxes, extra charges, section headers, custom subtotal wording, breakdown notes, informational totals, or unfamiliar fields: read [references/schema-v4.md](references/schema-v4.md).
 - Existing history, a new revision, restoration, deletion, or viewing an earlier offer: read [references/revisions.md](references/revisions.md).
 - Pending or completed goods receipts: read [references/goods-receipt.md](references/goods-receipt.md).
 - PDF export, portable-app setup, or application validation: read [references/software-pdf.md](references/software-pdf.md).
@@ -41,13 +41,15 @@ Keep command output compact: use `--json` for offline commands and `--compact` p
 
 ## Non-negotiable rules
 
-- Generate schema version 3. The offline validator accepts legacy version 2, and the builder upgrades legacy inputs without inventing earlier revisions. Never downgrade a history-bearing file for an older app.
+- Generate schema version 4. The offline validator accepts legacy versions 2 and 3, and the builder upgrades legacy inputs without inventing earlier revisions. Never downgrade a history-bearing file for an older app.
 - JSON creation and offline validation must not depend on an executable path, application availability, network access, or PDF success. Never store the executable path in quotation JSON.
 - Validate the final file with the bundled helper. When the configured application is used, treat its V2 structured validation issues as authoritative.
 - Preserve source wording and row order unless the user asks for cleanup.
 - Keep quotation item hierarchy to three levels maximum. Section headers are root-only.
+- Preserve the image table and `logoImageId` references when editing v4; read `schema-v4.md` before changing images. New partial inputs may use inline `logoDataUrl`; all saved outputs use v4 shared images.
 - Keep the quotation family ID and all saved revision IDs/content unchanged. The builder supplies IDs for new working content; saved snapshots are validated rather than repaired or renumbered.
 - Compose final JSON values for document-affecting GUI controls. Do not require a separate CLI mutation for state that belongs in the quotation JSON.
+- Store custom subtotal wording, breakdown notes, and informational section/item selections in `outputSettings`. Preserve supplied note text, including blank strings and line breaks; note omission and blank text have different meanings in `schema-v4.md`. These settings never change prices. Resolve selections to existing stable IDs; use the helper's `summaryDisplay` results to check their calculated sums.
 - Saved revisions are read-only. Use the create/restore/delete helpers for requested lifecycle changes; never emulate them by changing `header.revisionNumber`. Delete only a saved revision the user has asked to remove.
 - Treat `manualUnitPrice` as a unit selling price only when the evidence clearly says so. Divide a line total by quantity only when its meaning and a nonzero quantity are explicit.
 - `expectedTotal` is only a group mismatch check; it never supplies or changes a price.
@@ -56,13 +58,13 @@ Keep command output compact: use `--json` for offline commands and `--compact` p
 - Do not silently repair currencies, malformed rates, charges, or other supplied commercial data. Resolve or disclose every warning.
 - Derive goods-receipt lines and quoted quantities from the quotation. If the user does not specify receipt selection, use the app-matching `detailed` default of positive-quantity leaf lines and disclose it.
 - Use the configured Quotation Software for quotation and goods-receipt PDFs. If unavailable, report the PDF as pending; do not substitute another renderer.
-- Enforce the shared limits: the complete quotation JSON, including history, is at most 10 MiB; serialized pending receipt at most 5 MiB; logo must be PNG/JPEG/GIF/WebP, at most 5 MiB and 4096 x 4096 pixels. Never discard history to fit the limit.
+- Enforce the shared limits: the complete quotation JSON, including shared images and history, is at most 10 MiB of stored UTF-8 bytes; serialized pending receipt at most 5 MiB; logo must be PNG/JPEG/GIF/WebP, at most 5 MiB and 4096 x 4096 pixels. Deduplicate identical image strings without changing their bytes; never resize/recompress logos or discard history to fit the limit.
 
-Use [assets/quotation-v3-template.json](assets/quotation-v3-template.json) only as a manual starting point. Prefer the builder because it creates fresh IDs and timestamps. The retained v2 template is a legacy example, not the default output.
+Use [assets/quotation-v4-template.json](assets/quotation-v4-template.json) only as a manual starting point. Prefer the builder because it creates fresh IDs and timestamps. The retained v2/v3 templates are legacy examples, not the default output.
 
 ## Maintenance checks
 
-Calculation, import, and revision behavior last verified on 2026-10-12 against repository commit `8ead9d19f63964ad90dc1234bc35b5d1fa8099f9` (file schema 3; renderer API 2.2.0). The offline helper remains independent of the repository and executable. Probe the selected executable's `quotationSchemaVersion`; an API major version of 2 or app version of 0.1.0 alone does not establish revision support.
+Calculation, import, revision, and summary-display behavior verified on 2026-10-15 against the working checkout based on commit `df7f1a23e68d6c1b680083b978f7c534bc7dff96`, including its uncommitted shared-image, summary-display, and editable-note changes (file schema 4; renderer API 2.2.0). This is source parity, not proof that a packaged EXE contains those changes. The offline helper remains independent of the repository and executable. The software helper checks schema support and round-trips summary settings when present; API/schema version numbers alone do not establish support for these newer optional fields.
 
 When changing the helper or syncing repository behavior, run:
 

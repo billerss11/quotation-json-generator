@@ -1,12 +1,12 @@
 # Quotation revision workflows
 
-Use the complete schema-v3 envelope throughout editing: `{ schemaVersion, app, exportedAt, quotation, revisions }`. A new quotation has `revisions: []`. Existing schema-v2 quotations can be upgraded without inventing earlier offers, even if their printed revision number is greater than 1.
+Use the complete schema-v4 envelope throughout editing: `{ schemaVersion, app, exportedAt, quotation, revisions, images }`. A new quotation has `revisions: []` and `images: {}` when it has no logo. Schema-v3 files retain every snapshot when upgraded; only image storage changes. All mutation commands emit v4, deduplicate exact image strings across current and saved versions, and never recompress them. Existing schema-v1/v2 quotations can be upgraded without inventing earlier offers, even if their printed revision number is greater than 1.
 
 ## Choose the requested operation
 
 | User intent | Operation |
 | --- | --- |
-| Change a price, note, or item in the current draft | Edit only `quotation`, then build/validate the complete envelope. Keep all `revisions` unchanged. |
+| Change a price, note, or item in the current draft | Edit only `quotation`, then build/validate the complete envelope. Keep all decoded revision content unchanged and retain shared image references. |
 | Create the next revision or keep the current offer before editing | Create a revision first, then edit the next working quotation. |
 | View or switch to an older offer | Read its saved snapshot. Do not restore or change the working quotation merely to view it. |
 | Restore an earlier offer for further editing | Restore as a new working revision; the current work is archived first. |
@@ -47,7 +47,7 @@ Deletion never creates a replacement archive or renumbers anything. Deleting the
 - Item IDs can recur across different snapshots; validate uniqueness within each quotation independently.
 - The working revision number is greater than every saved number. Gaps after deletion are valid. Do not fabricate missing revisions.
 - Preserve saved fields exactly, including blank strings, whitespace, original labels, pricing, rates, branding, and receipt records. Reject invalid history rather than repairing or dropping entries.
-- Validate every snapshot and the whole envelope's 10 MiB limit. A failed operation leaves the source intact; never drop history or wrap history recursively inside a snapshot.
+- Validate every snapshot and the stored envelope's 10 MiB limit. A failed operation leaves the source intact; never drop history or wrap history recursively inside a snapshot.
 
 ## Working in an open app
 
@@ -59,4 +59,4 @@ Use `listQuotationRevisions`, `getQuotationRevision`, `createQuotationRevision`,
 
 For an archived PDF, use `exportPdfToFile(path, { quotationRevisionId })`; it leaves the working draft unchanged. The portable CLI's `render` command exports the working quotation and has no revision-selection flag. An archived PDF is newly rendered from its snapshot, not an archived copy of the PDF originally issued.
 
-Older portable builds that report schema 2 cannot read new schema-3 files. The helper detects this before rendering. Deliver the valid JSON and report application validation/PDF as pending until a compatible build is configured; never discard history for compatibility.
+Older portable builds that report schema 2 or 3 cannot read new schema-4 files. The helper detects this before rendering. Deliver the valid JSON and report application validation/PDF as pending until a compatible build is configured; never discard history for compatibility.

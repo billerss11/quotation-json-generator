@@ -5,6 +5,8 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
+import { decodeQuotationEnvelope, encodeQuotationEnvelope } from './quotation-images.mjs'
+export { decodeQuotationEnvelope, encodeQuotationEnvelope } from './quotation-images.mjs'
 
 const templates = new Set([
   'classic', 'technical-bid', 'executive-summary', 'luminous', 'signal', 'atelier', 'spreadsheet',
@@ -29,6 +31,7 @@ export const automationLimits = {
 }
 const allowedEnvelopeFields = new Set(['schemaVersion', 'app', 'exportedAt', 'quotation'])
 const allowedV3EnvelopeFields = new Set([...allowedEnvelopeFields, 'revisions'])
+const allowedV4EnvelopeFields = new Set([...allowedV3EnvelopeFields, 'images'])
 const allowedRevisionFields = new Set(['id', 'revisionNumber', 'createdAt', 'note', 'quotation'])
 const allowedQuotationFields = new Set([
   'id', 'templateId', 'companyProfileId', 'companyProfileSnapshot', 'header', 'majorItems',
@@ -41,7 +44,8 @@ const allowedHeaderFields = new Set([
   'quotationNumber', 'revisionNumber', 'quotationDate', 'customerCompany', 'contactPerson',
   'contactDetails', 'projectName', 'validityPeriod', 'currency', 'documentLocale', 'notes', 'terms',
 ])
-const allowedOutputSettingsFields = new Set(['itemDetailLevel'])
+const allowedOutputSettingsFields = new Set(['itemDetailLevel', 'subtotalLabel', 'informationalTotalsNote', 'showInformationalTotals', 'informationalTotals'])
+const allowedInformationalTotalFields = new Set(['id', 'label', 'sectionIds', 'visible', 'source', 'itemIds'])
 const allowedItemFields = new Set([
   'id', 'name', 'description', 'quantity', 'quantityUnit', 'pricingMethod', 'manualUnitPrice',
   'unitCost', 'costCurrency', 'markupRate', 'taxClassId', 'expectedTotal', 'notes', 'children',
@@ -75,16 +79,23 @@ const supportedCurrencies = new Set(
 
 export function buildQuotationEnvelope(input, now = new Date()) {
   if (!isRecord(input)) throw new Error('Input must be a JSON object.')
-  if (input.schemaVersion !== undefined && ![1, 2, 3].includes(input.schemaVersion)) {
-    throw new Error('Unsupported schemaVersion; expected 1, 2, or 3.')
+  if (input.schemaVersion !== undefined && ![1, 2, 3, 4].includes(input.schemaVersion)) {
+    throw new Error('Unsupported schemaVersion; expected 1, 2, 3, or 4.')
   }
-  if (input.revisions !== undefined && input.schemaVersion !== 3) {
-    throw new Error('Revision history requires a complete schemaVersion 3 envelope.')
+  if (input.revisions !== undefined && ![3, 4].includes(input.schemaVersion)) {
+    throw new Error('Revision history requires a complete schemaVersion 3 or 4 envelope.')
+  }
+  if (input.schemaVersion === 4) {
+    const errors = []
+    validateEnvelopeFields(input, errors)
+    validateSharedImages(input.images, errors)
+    if (errors.length) throw new Error(`Cannot build quotation:\n- ${errors.join('\n- ')}`)
+    input = decodeQuotationEnvelope(input)
   }
   // Working rows may be partial, but the family identity and saved history must be valid.
   if (input.schemaVersion === 3) {
     const errors = []
-    validateEnvelopeFields(input, errors)
+    validateEnvelopeFields(input, errors, false)
     if (!isRecord(input.quotation)) {
       errors.push('quotation must be an object.')
     } else {
@@ -100,6 +111,9 @@ export function buildQuotationEnvelope(input, now = new Date()) {
 
   const warnings = []
   const source = isRecord(input.quotation) ? input.quotation : input
+  if (isRecord(source.branding) && Object.hasOwn(source.branding, 'logoImageId')) {
+    throw new Error('branding.logoImageId requires a complete schemaVersion 4 envelope; do not mix inline logos and references.')
+  }
   if (source !== input && 'revisions' in source) throw new Error('quotation cannot contain nested revisions.')
   const headerSource = isRecord(source.header) ? source.header : {}
   if (headerSource.revisionNumber !== undefined && !isPositiveSafeInteger(headerSource.revisionNumber)) {
@@ -152,11 +166,7 @@ export function buildQuotationEnvelope(input, now = new Date()) {
       terms: text(headerSource.terms),
     },
     majorItems,
-    outputSettings: {
-      itemDetailLevel: [1, 2, 3].includes(source.outputSettings?.itemDetailLevel)
-        ? source.outputSettings.itemDetailLevel
-        : 3,
-    },
+    outputSettings: buildOutputSettings(source.outputSettings),
     totalsConfig: {
       globalMarkupRate: finiteNumber(totalsSource.globalMarkupRate) ? totalsSource.globalMarkupRate : 0,
       extraCharges: buildExtraCharges(totalsSource.extraCharges, warnings),
@@ -194,9 +204,10 @@ export function buildQuotationEnvelope(input, now = new Date()) {
     schemaVersion: 3, app: 'quotation-software', exportedAt: timestamp, quotation,
     revisions: input.schemaVersion === 3 ? structuredClone(input.revisions) : [],
   }
-  const result = validateQuotationEnvelope(envelope)
+  const persisted = encodeQuotationEnvelope(envelope)
+  const result = validateQuotationEnvelope(persisted)
   if (result.errors.length > 0) throw new Error(`Cannot build quotation:\n- ${result.errors.join('\n- ')}`)
-  return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
+  return { envelope: persisted, warnings: [...new Set([...warnings, ...result.warnings])] }
 }
 
 export function validateQuotationEnvelope(value) {
@@ -204,6 +215,11 @@ export function validateQuotationEnvelope(value) {
   const warnings = []
   if (!isRecord(value)) return { errors: ['Root value must be an object.'], warnings }
   validateEnvelopeFields(value, errors)
+  if (value.schemaVersion === 4) {
+    validateSharedImages(value.images, errors)
+    try { value = decodeQuotationEnvelope(value) }
+    catch (error) { return { errors: [...errors, error.message], warnings } }
+  }
   const active = validateQuotation(value.quotation)
   errors.push(...active.errors)
   warnings.push(...active.warnings)
@@ -211,14 +227,22 @@ export function validateQuotationEnvelope(value) {
   return { errors, warnings: [...new Set(warnings)] }
 }
 
-function validateEnvelopeFields(value, errors) {
-  validateAllowedFields(value, value.schemaVersion === 3 ? allowedV3EnvelopeFields : allowedEnvelopeFields, 'root', errors)
-  if (getUtf8ByteLength(JSON.stringify(value)) > automationLimits.quotationJsonBytes) {
+function validateEnvelopeFields(value, errors, enforceSizeLimit = true) {
+  validateAllowedFields(value, value.schemaVersion === 4 ? allowedV4EnvelopeFields : value.schemaVersion === 3 ? allowedV3EnvelopeFields : allowedEnvelopeFields, 'root', errors)
+  if (enforceSizeLimit && getUtf8ByteLength(JSON.stringify(value)) > automationLimits.quotationJsonBytes) {
     errors.push(`Quotation JSON exceeds the ${automationLimits.quotationJsonBytes} byte limit.`)
   }
-  if (![2, 3].includes(value.schemaVersion)) errors.push('schemaVersion must be 2 or 3.')
+  if (![2, 3, 4].includes(value.schemaVersion)) errors.push('schemaVersion must be 2, 3, or 4.')
   if (value.app !== 'quotation-software') errors.push('app must be quotation-software.')
   if (!canonicalIso(value.exportedAt)) errors.push('exportedAt must be a canonical UTC ISO timestamp.')
+}
+
+function validateSharedImages(images, errors) {
+  if (!isRecord(images)) return
+  for (const [id, dataUrl] of Object.entries(images)) {
+    const result = validateLogoDataUrl(dataUrl)
+    if (!result.ok || dataUrl === '') errors.push(`images.${id}: ${result.message ?? 'Image must not be empty.'}`)
+  }
 }
 
 function validateQuotation(quotation) {
@@ -236,11 +260,7 @@ function validateQuotation(quotation) {
   if (quotation.lineItemEntryMode !== undefined && !['detailed', 'quick'].includes(quotation.lineItemEntryMode)) {
     errors.push('Legacy lineItemEntryMode must be detailed or quick when present.')
   }
-  if (![1, 2, 3].includes(quotation.outputSettings?.itemDetailLevel)) {
-    errors.push('outputSettings.itemDetailLevel must be 1, 2, or 3.')
-  } else {
-    validateAllowedFields(quotation.outputSettings, allowedOutputSettingsFields, 'outputSettings', errors)
-  }
+  validateOutputSettings(quotation.outputSettings, quotation.majorItems, errors, warnings)
 
   const taxClassIds = validateTotals(quotation.totalsConfig, errors)
   const itemIds = new Set()
@@ -282,6 +302,127 @@ function validateQuotation(quotation) {
   }
   validateGoodsReceiptHistory(quotation.goodsReceiptHistory, quotation, errors, warnings)
   return { errors, warnings: [...new Set(warnings)] }
+}
+
+function buildOutputSettings(value) {
+  if (value === undefined) return { itemDetailLevel: 3 }
+  if (!isRecord(value)) throw new Error('outputSettings must be an object.')
+  const errors = []
+  validateAllowedFields(value, allowedOutputSettingsFields, 'outputSettings', errors)
+  if (value.itemDetailLevel !== undefined && ![1, 2, 3].includes(value.itemDetailLevel)) {
+    errors.push('outputSettings.itemDetailLevel must be 1, 2, or 3.')
+  }
+  const settings = { itemDetailLevel: value.itemDetailLevel ?? 3 }
+  for (const [field, type] of [['subtotalLabel', 'string'], ['informationalTotalsNote', 'string'], ['showInformationalTotals', 'boolean']]) {
+    if (value[field] === undefined) continue
+    if (typeof value[field] !== type) errors.push(`outputSettings.${field} must be a ${type}.`)
+    else settings[field] = value[field]
+  }
+  if (value.informationalTotals !== undefined) {
+    if (!Array.isArray(value.informationalTotals)) {
+      errors.push('outputSettings.informationalTotals must be an array.')
+    } else {
+      const ids = new Set()
+      settings.informationalTotals = value.informationalTotals.map((row, index) => {
+        const path = `outputSettings.informationalTotals[${index}]`
+        if (!isRecord(row)) {
+          errors.push(`${path} must be an object.`)
+          return row
+        }
+        validateAllowedFields(row, allowedInformationalTotalFields, path, errors)
+        if (row.id !== undefined && typeof row.id !== 'string') errors.push(`${path}.id must be a string.`)
+        const requestedId = nonEmpty(row.id) ? row.id.trim() : undefined
+        if (requestedId && ids.has(requestedId)) errors.push(`Duplicate informational total ID: ${requestedId}.`)
+        const result = {
+          id: uniqueId(requestedId, ids),
+          label: row.label ?? '',
+          sectionIds: row.sectionIds ?? [],
+          visible: row.visible ?? true,
+        }
+        if (row.label !== undefined && typeof row.label !== 'string') errors.push(`${path}.label must be a string.`)
+        if (row.visible !== undefined && typeof row.visible !== 'boolean') errors.push(`${path}.visible must be a boolean.`)
+        if (row.sectionIds !== undefined && !isReferenceIdArray(row.sectionIds)) errors.push(`${path}.sectionIds must be an array of non-empty IDs.`)
+        if (row.source !== undefined) {
+          result.source = row.source
+          if (!['sections', 'items'].includes(row.source)) errors.push(`${path}.source must be sections or items.`)
+        }
+        if (row.itemIds !== undefined) {
+          result.itemIds = row.itemIds
+          if (!isReferenceIdArray(row.itemIds)) errors.push(`${path}.itemIds must be an array of non-empty IDs.`)
+        }
+        if (isReferenceIdArray(result.sectionIds)) result.sectionIds = [...new Set(result.sectionIds)]
+        if (isReferenceIdArray(result.itemIds)) result.itemIds = [...new Set(result.itemIds)]
+        return result
+      })
+    }
+  }
+  if (errors.length) throw new Error(`Cannot build output settings:\n- ${errors.join('\n- ')}`)
+  return settings
+}
+
+function validateOutputSettings(value, majorItems, errors, warnings) {
+  if (!isRecord(value)) {
+    errors.push('outputSettings must be an object.')
+    return
+  }
+  validateAllowedFields(value, allowedOutputSettingsFields, 'outputSettings', errors)
+  if (![1, 2, 3].includes(value.itemDetailLevel)) errors.push('outputSettings.itemDetailLevel must be 1, 2, or 3.')
+  if (value.subtotalLabel !== undefined && typeof value.subtotalLabel !== 'string') errors.push('outputSettings.subtotalLabel must be a string.')
+  if (value.informationalTotalsNote !== undefined && typeof value.informationalTotalsNote !== 'string') errors.push('outputSettings.informationalTotalsNote must be a string.')
+  if (value.showInformationalTotals !== undefined && typeof value.showInformationalTotals !== 'boolean') errors.push('outputSettings.showInformationalTotals must be a boolean.')
+  if (value.informationalTotals === undefined) return
+  if (!Array.isArray(value.informationalTotals)) {
+    errors.push('outputSettings.informationalTotals must be an array.')
+    return
+  }
+  const rowIds = new Set()
+  const { sectionIds, itemIds } = collectSummaryReferenceIds(majorItems)
+  value.informationalTotals.forEach((row, index) => {
+    const path = `outputSettings.informationalTotals[${index}]`
+    if (!isRecord(row)) {
+      errors.push(`${path} must be an object.`)
+      return
+    }
+    validateAllowedFields(row, allowedInformationalTotalFields, path, errors)
+    if (!nonEmpty(row.id)) errors.push(`${path}.id must be non-empty.`)
+    else if (rowIds.has(row.id)) errors.push(`Duplicate informational total ID: ${row.id}.`)
+    else rowIds.add(row.id)
+    if (typeof row.label !== 'string') errors.push(`${path}.label must be a string.`)
+    if (typeof row.visible !== 'boolean') errors.push(`${path}.visible must be a boolean.`)
+    if (!isReferenceIdArray(row.sectionIds)) errors.push(`${path}.sectionIds must be an array of non-empty IDs.`)
+    if (row.source !== undefined && !['sections', 'items'].includes(row.source)) errors.push(`${path}.source must be sections or items.`)
+    if (row.itemIds !== undefined && !isReferenceIdArray(row.itemIds)) errors.push(`${path}.itemIds must be an array of non-empty IDs.`)
+    if (value.showInformationalTotals !== true || row.visible !== true) return
+    const usesItems = row.source === 'items'
+    const references = usesItems ? row.itemIds ?? [] : row.sectionIds
+    if (!isReferenceIdArray(references)) return
+    const field = usesItems ? 'itemIds' : 'sectionIds'
+    if (references.length === 0) warnings.push(`${path}.${field}: no ${usesItems ? 'items' : 'sections'} are selected for this visible informational total.`)
+    const available = usesItems ? itemIds : sectionIds
+    const missing = [...new Set(references)].filter((id) => !available.has(id))
+    if (missing.length) warnings.push(`${path}.${field}: selected ${usesItems ? 'items' : 'sections'} no longer exist: ${missing.join(', ')}.`)
+  })
+}
+
+function collectSummaryReferenceIds(majorItems) {
+  const sectionIds = new Set()
+  const itemIds = new Set()
+  for (const row of Array.isArray(majorItems) ? majorItems : []) {
+    if (!isRecord(row)) continue
+    if (row.kind === 'section_header') sectionIds.add(row.id)
+    else collectItem(row)
+  }
+  return { sectionIds, itemIds }
+
+  function collectItem(item) {
+    if (!isRecord(item)) return
+    itemIds.add(item.id)
+    for (const child of Array.isArray(item.children) ? item.children : []) collectItem(child)
+  }
+}
+
+function isReferenceIdArray(value) {
+  return Array.isArray(value) && value.every(nonEmpty)
 }
 
 function validateRevisions(value, errors, warnings) {
@@ -355,7 +496,7 @@ export function restoreQuotationRevisionInEnvelope(value, revisionId, now = new 
 
 function advanceQuotationRevision(value, options, now) {
   const warnings = assertValidEnvelope(value, 'change revisions on an invalid quotation')
-  const envelope = upgradeEnvelope(structuredClone(value))
+  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
   const current = envelope.quotation
   const currentNumber = current.header.revisionNumber
   if (currentNumber === Number.MAX_SAFE_INTEGER) throw new Error('Cannot create the next revision: revision number overflow.')
@@ -376,22 +517,24 @@ function advanceQuotationRevision(value, options, now) {
   })
   envelope.quotation = quotation
   envelope.exportedAt = timestamp
-  const resultWarnings = assertValidEnvelope(envelope, 'create the next quotation revision')
-  return { envelope, warnings: [...new Set([...warnings, ...resultWarnings])] }
+  const persisted = encodeQuotationEnvelope(envelope)
+  const resultWarnings = assertValidEnvelope(persisted, 'create the next quotation revision')
+  return { envelope: persisted, warnings: [...new Set([...warnings, ...resultWarnings])] }
 }
 
 export function deleteQuotationRevisionFromEnvelope(value, revisionId, now = new Date()) {
   const warnings = assertValidEnvelope(value, 'delete revisions from an invalid quotation')
   if (!nonEmpty(revisionId)) throw new Error('A non-empty revision ID is required.')
-  const envelope = upgradeEnvelope(structuredClone(value))
+  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
   const index = envelope.revisions.findIndex((revision) => revision.id === revisionId)
   if (index < 0) throw new Error(`Revision not found: ${revisionId}`)
   envelope.revisions.splice(index, 1)
   const timestamp = now.toISOString()
   envelope.exportedAt = timestamp
   envelope.quotation.metadata.updatedAt = timestamp
-  const resultWarnings = assertValidEnvelope(envelope, 'delete quotation revision')
-  return { envelope, warnings: [...new Set([...warnings, ...resultWarnings])] }
+  const persisted = encodeQuotationEnvelope(envelope)
+  const resultWarnings = assertValidEnvelope(persisted, 'delete quotation revision')
+  return { envelope: persisted, warnings: [...new Set([...warnings, ...resultWarnings])] }
 }
 
 export function validateQuotationJsonContent(content) {
@@ -415,12 +558,11 @@ export function setPendingGoodsReceiptDraftInEnvelope(value, input, now = new Da
   if (!isRecord(value)) throw new Error('Quotation file must be a JSON object.')
   if (!isRecord(input)) throw new Error('Goods-receipt input must be a JSON object.')
 
-  const envelope = structuredClone(value)
-  const existing = validateQuotationEnvelope(envelope)
+  const existing = validateQuotationEnvelope(value)
   if (existing.errors.length > 0) {
     throw new Error(`Cannot set goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
-  upgradeEnvelope(envelope)
+  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
 
   const warnings = [...existing.warnings]
   const timestamp = now.toISOString()
@@ -434,24 +576,24 @@ export function setPendingGoodsReceiptDraftInEnvelope(value, input, now = new Da
   envelope.exportedAt = timestamp
   envelope.quotation.metadata.updatedAt = timestamp
 
-  const result = validateQuotationEnvelope(envelope)
+  const persisted = encodeQuotationEnvelope(envelope)
+  const result = validateQuotationEnvelope(persisted)
   if (result.errors.length > 0) {
     throw new Error(`Cannot set goods-receipt draft:\n- ${result.errors.join('\n- ')}`)
   }
 
-  return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
+  return { envelope: persisted, warnings: [...new Set([...warnings, ...result.warnings])] }
 }
 
 export function addGoodsReceiptToEnvelope(value, input, now = new Date()) {
   if (!isRecord(value)) throw new Error('Quotation file must be a JSON object.')
   if (!isRecord(input)) throw new Error('Goods-receipt input must be a JSON object.')
 
-  const envelope = structuredClone(value)
-  const existing = validateQuotationEnvelope(envelope)
+  const existing = validateQuotationEnvelope(value)
   if (existing.errors.length > 0) {
     throw new Error(`Cannot add goods receipt to an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
-  upgradeEnvelope(envelope)
+  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
 
   const warnings = [...existing.warnings]
   const timestamp = now.toISOString()
@@ -481,35 +623,36 @@ export function addGoodsReceiptToEnvelope(value, input, now = new Date()) {
   envelope.exportedAt = timestamp
   envelope.quotation.metadata.updatedAt = timestamp
 
-  const result = validateQuotationEnvelope(envelope)
+  const persisted = encodeQuotationEnvelope(envelope)
+  const result = validateQuotationEnvelope(persisted)
   if (result.errors.length > 0) {
     throw new Error(`Cannot add goods receipt:\n- ${result.errors.join('\n- ')}`)
   }
 
-  return { envelope, warnings: [...new Set([...warnings, ...result.warnings])] }
+  return { envelope: persisted, warnings: [...new Set([...warnings, ...result.warnings])] }
 }
 
 export function clearPendingGoodsReceiptDraftInEnvelope(value, now = new Date()) {
   if (!isRecord(value)) throw new Error('Quotation file must be a JSON object.')
 
-  const envelope = structuredClone(value)
-  const existing = validateQuotationEnvelope(envelope)
+  const existing = validateQuotationEnvelope(value)
   if (existing.errors.length > 0) {
     throw new Error(`Cannot clear goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
-  upgradeEnvelope(envelope)
+  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
 
   delete envelope.quotation.pendingGoodsReceiptDraft
   const timestamp = now.toISOString()
   envelope.exportedAt = timestamp
   envelope.quotation.metadata.updatedAt = timestamp
 
-  const result = validateQuotationEnvelope(envelope)
+  const persisted = encodeQuotationEnvelope(envelope)
+  const result = validateQuotationEnvelope(persisted)
   if (result.errors.length > 0) {
     throw new Error(`Cannot clear goods-receipt draft:\n- ${result.errors.join('\n- ')}`)
   }
 
-  return { envelope, warnings: [...new Set([...existing.warnings, ...result.warnings])] }
+  return { envelope: persisted, warnings: [...new Set([...existing.warnings, ...result.warnings])] }
 }
 
 export function summarizeQuotationEnvelope(value) {
@@ -518,7 +661,7 @@ export function summarizeQuotationEnvelope(value) {
     throw new Error(`Cannot summarize an invalid quotation:\n- ${validation.errors.join('\n- ')}`)
   }
 
-  const quotation = value.quotation
+  const quotation = decodeQuotationEnvelope(value).quotation
   const exchangeRates = Object.fromEntries(Object.entries(quotation.exchangeRates)
     .map(([currency, rate]) => [normalizeCurrency(currency), rate]))
   const items = quotation.majorItems.filter((item) => item.kind !== 'section_header')
@@ -544,6 +687,7 @@ export function summarizeQuotationEnvelope(value) {
   const extraChargesTotal = roundMoney(sumAmounts(
     quotation.totalsConfig.extraCharges.map((charge) => roundMoney(toPositiveNumber(charge.amount))),
   ))
+  const summaryDisplay = summarizeSummaryDisplay(quotation, items, summaries, exchangeRates)
 
   return {
     quotationNumber: quotation.header.quotationNumber,
@@ -556,7 +700,98 @@ export function summarizeQuotationEnvelope(value) {
     extraChargesTotal,
     grandTotal: roundMoney(taxableSubtotal + taxAmount + extraChargesTotal),
     taxBuckets,
+    ...(summaryDisplay === undefined ? {} : { summaryDisplay }),
   }
+}
+
+function summarizeSummaryDisplay(quotation, rootItems, summaries, exchangeRates) {
+  const settings = quotation.outputSettings
+  if (settings.subtotalLabel === undefined && settings.informationalTotalsNote === undefined && settings.showInformationalTotals === undefined && settings.informationalTotals === undefined) return undefined
+  const subtotalById = new Map(rootItems.map((item, index) => [item.id, summaries[index].subtotal]))
+  const sections = []
+  let currentSection
+  for (const row of quotation.majorItems) {
+    if (row.kind === 'section_header') {
+      currentSection = { id: row.id, title: row.title, subtotal: 0 }
+      sections.push(currentSection)
+    } else if (currentSection) {
+      currentSection.subtotal += subtotalById.get(row.id) ?? 0
+    }
+  }
+  const sectionById = new Map(sections.map((section) => [section.id, { ...section, subtotal: roundMoney(section.subtotal) }]))
+  const itemById = new Map()
+  rootItems.forEach((item) => collectContribution(createContribution(item, [], undefined, subtotalById.get(item.id))))
+
+  return {
+    subtotalLabel: settings.subtotalLabel?.trim() || null,
+    ...(settings.informationalTotalsNote === undefined ? {} : { informationalTotalsNote: settings.informationalTotalsNote }),
+    showInformationalTotals: settings.showInformationalTotals === true,
+    informationalTotals: (settings.informationalTotals ?? []).map((row) => {
+      const sectionIds = [...new Set(row.sectionIds)]
+      const itemIds = [...new Set(row.itemIds ?? [])]
+      const usesItems = row.source === 'items'
+      const missingSectionIds = usesItems ? [] : sectionIds.filter((id) => !sectionById.has(id))
+      const missingItemIds = usesItems ? itemIds.filter((id) => !itemById.has(id)) : []
+      const selectedSections = sectionIds.flatMap((id) => sectionById.has(id) ? [sectionById.get(id)] : [])
+      const selectedItemIds = new Set(itemIds)
+      const selectedItems = itemIds.flatMap((id) => {
+        const item = itemById.get(id)
+        return item && !item.ancestorIds.some((ancestorId) => selectedItemIds.has(ancestorId)) ? [item] : []
+      })
+      const selectedIds = usesItems ? itemIds : sectionIds
+      const selection = usesItems ? selectedItems : selectedSections
+      return {
+        ...row,
+        sectionIds,
+        ...(row.itemIds === undefined ? {} : { itemIds }),
+        label: row.label.trim() || (usesItems ? selectedItems.map((item) => item.name) : selectedSections.map((section) => section.title)).join(' + '),
+        amount: selectedIds.length === 0 || missingSectionIds.length > 0 || missingItemIds.length > 0
+          ? null
+          : roundMoney(sumAmounts(selection.map((entry) => entry.subtotal))),
+        missingSectionIds,
+        missingItemIds,
+        isVisible: settings.showInformationalTotals === true && row.visible,
+      }
+    }),
+  }
+
+  function createContribution(item, ancestorIds, inheritedMarkupRate, canonicalSubtotal) {
+    const nextMarkupRate = getInheritedMarkupRate(item.markupRate, inheritedMarkupRate)
+    const contribution = {
+      id: item.id,
+      name: item.name,
+      ancestorIds,
+      subtotal: canonicalSubtotal ?? calculateQuotationItemSellingAmount(
+        item, quotation.totalsConfig.globalMarkupRate, exchangeRates, inheritedMarkupRate,
+      ),
+      children: item.children.map((child) => createContribution(child, [...ancestorIds, item.id], nextMarkupRate)),
+    }
+    scaleSummaryItemChildren(contribution, item.quantity)
+    return contribution
+  }
+
+  function collectContribution(contribution) {
+    itemById.set(contribution.id, contribution)
+    contribution.children.forEach(collectContribution)
+  }
+}
+
+function scaleSummaryItemChildren(contribution, quantity) {
+  if (contribution.children.length === 0) return
+  const sourceAmounts = contribution.children.map((child) => child.subtotal)
+  const scaledAmounts = scaleRoundedAmounts(sourceAmounts, quantity)
+  let adjustment = roundMoney(contribution.subtotal - sumAmounts(scaledAmounts))
+  // Carry the parent's assigned rounding cent through every descendant boundary.
+  for (let index = scaledAmounts.length - 1; index >= 0 && adjustment !== 0; index -= 1) {
+    if (sourceAmounts[index] <= 0) continue
+    const change = adjustment > 0 ? adjustment : -Math.min(scaledAmounts[index], -adjustment)
+    scaledAmounts[index] = roundMoney(scaledAmounts[index] + change)
+    adjustment = roundMoney(adjustment - change)
+  }
+  contribution.children.forEach((child, index) => {
+    child.subtotal = scaledAmounts[index]
+    scaleSummaryItemChildren(child, quantity)
+  })
 }
 
 export function buildGoodsReceiptDraft(quotation, input, warnings = [], timestamp = new Date().toISOString()) {
@@ -1518,6 +1753,20 @@ function sumAmounts(amounts) {
   return amounts.reduce((total, amount) => total + amount, 0)
 }
 
+function scaleRoundedAmounts(amounts, quantity) {
+  const multiplier = toPositiveNumber(quantity)
+  const expected = roundMoney(multiplier * sumAmounts(amounts))
+  const scaled = amounts.map((amount) => roundMoney(multiplier * amount))
+  let adjustment = roundMoney(expected - sumAmounts(scaled))
+  for (let index = scaled.length - 1; index >= 0 && adjustment !== 0; index -= 1) {
+    if (amounts[index] <= 0) continue
+    const change = adjustment > 0 ? adjustment : -Math.min(scaled[index], -adjustment)
+    scaled[index] = roundMoney(scaled[index] + change)
+    adjustment = roundMoney(adjustment - change)
+  }
+  return scaled
+}
+
 function toPositiveNumber(value) {
   return Number.isFinite(value) ? Math.max(value, 0) : 0
 }
@@ -1712,7 +1961,7 @@ async function readJsonFile(filePath) {
 }
 
 async function writeQuotationFile(filePath, envelope) {
-  const content = `${JSON.stringify(envelope, null, 2)}\n`
+  const content = `${JSON.stringify(encodeQuotationEnvelope(envelope), null, 2)}\n`
   const result = validateQuotationJsonContent(content)
   if (result.errors.length) throw new Error(`Cannot write quotation:\n- ${result.errors.join('\n- ')}`)
   await writeFile(resolve(filePath), content, 'utf8')

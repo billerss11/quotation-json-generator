@@ -10,7 +10,7 @@ const api = window.quotationAgentV2
 if (!api) throw new Error('Quotation automation API V2 is unavailable')
 ```
 
-Call `api.getApiInfo()` when capabilities matter. The current renderer API is 2.2.0 and file schema is 3; discover both instead of comparing app-version strings. Path import/export and direct PDF export require desktop/headless capability; browser automation should use content methods and browser print. Legacy methods have no revision-management contract, so never fall back to them for revision operations.
+Call `api.getApiInfo()` when capabilities matter. The current renderer API is 2.2.0 and file schema is 4; discover both instead of comparing app-version strings. Path import/export and direct PDF export require desktop/headless capability; browser automation should use content methods and browser print. Legacy methods have no revision-management contract, so never fall back to them for revision operations.
 
 ## Preferred workflow
 
@@ -22,11 +22,36 @@ Call `api.getApiInfo()` when capabilities matter. The current renderer API is 2.
 
 `serializeQuotation().data.content` is the complete history-preserving JSON. `getQuotationSnapshot().data.quotation` is only the working draft; serializing that alone loses history. `meta.revision` / `expectedRevision` are renderer-session concurrency counters, distinct from the saved archive ID and `quotation.header.revisionNumber`.
 
+Snapshots expose expanded `branding.logoDataUrl`. Serialized and saved files use schema 4 with top-level shared `images` and `branding.logoImageId` in both working and saved quotations. Use the full serialized content for file round trips; do not mix the two branding representations.
+
 Most V2 operations return a discriminated result. Check the outer `result.ok` first; `getApiInfo()` and `waitUntilReady()` instead return API information directly. Successful validation calls still require checking `result.data.valid`. Successful goal-seek calls still require checking the nested `result.data.ok` before claiming a solved price or applying its markup.
 
 Item goal seek may return `data.ok: false` with `reason: 'target_unreachable'` when cent rounding and four-decimal markup precision cannot reproduce the target. Quotation goal seek can report the closest amount/rate; do not describe that diagnostic as an exact solution. Both item and quotation successful solves use canonical prices, including mixed-tax rounding for the selected quotation target. Report structured issue codes and field paths.
 
 The quotation currency's rate is locked to `1` inside `applyOperations` as well as individual FX calls. A batch that tries to change it fails with `base_currency_locked` before any following goal seek is applied. A currency rebase outside the supported rate range is rejected as a whole.
+
+## Summary display
+
+Use `setOutputSettings()` for custom subtotal wording, breakdown notes, and informational sums. It accepts partial updates; replacing `informationalTotals` replaces that list, so preserve unrelated rows when editing one. Source IDs come from the current quotation snapshot/item tree, not printed row numbers.
+
+```js
+const result = await api.setOutputSettings({
+  subtotalLabel: 'Materials total',
+  informationalTotalsNote: 'Already included in Materials total.',
+  showInformationalTotals: true,
+  informationalTotals: [{
+    id: 'selected-materials',
+    label: 'Selected equipment and valves',
+    source: 'items',
+    sectionIds: [],
+    itemIds: selectedExistingItemIds,
+    visible: true,
+  }],
+})
+if (!result.ok) throw new Error(result.error.code)
+```
+
+For whole sections, use `source: 'sections'` and existing header IDs in `sectionIds`. Set `informationalTotalsNote: ''` to hide the note; omit the field from imported JSON for the localized default. See [schema-v4.md](schema-v4.md) for text and inclusion/rounding rules. After importing into an older open editor, inspect `getQuotationSnapshot()` or `serializeQuotation()` to confirm the requested settings survived before exporting. API 2.2.0 and schema 3 existed before these features and are not sufficient proof of support.
 
 ## Quotation revisions
 

@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 
-import { buildQuotationEnvelope } from './quotation-json.mjs'
+import { buildQuotationEnvelope, decodeQuotationEnvelope, encodeQuotationEnvelope } from './quotation-json.mjs'
 import {
   QuotationSoftwareExecutionError,
   configureCurrentSoftware,
@@ -38,7 +38,7 @@ async function writeManifest(filePath, softwarePath, appVersion, builtAt) {
   await writeJson(filePath, { schemaVersion: 1, softwarePath, appVersion, builtAt })
 }
 
-async function mockPortableApplication(t, directory, apiInfo) {
+async function mockPortableApplication(t, directory, apiInfo, { normalizeInput, documentReport } = {}) {
   const executablePath = join(directory, 'mock-portable.exe')
   const configPath = join(directory, 'config.json')
   await writeFile(executablePath, '')
@@ -56,12 +56,18 @@ async function mockPortableApplication(t, directory, apiInfo) {
         const argument = flag => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined
         const command = args[1]
         if (command !== 'api-info' && argument('--output-json')) {
-          await writeFile(argument('--output-json'), await readFile(argument('--input')))
+          const content = await readFile(argument('--input'), 'utf8')
+          if (normalizeInput) await writeJson(argument('--output-json'), await normalizeInput(JSON.parse(content), { command, args }))
+          else await writeFile(argument('--output-json'), content)
         }
-        await writeJson(argument('--result-json'), command === 'api-info'
+        for (const flag of ['--quotation-pdf', '--goods-receipt-pdf']) {
+          if (argument(flag)) await writeFile(argument(flag), 'mock PDF')
+        }
+        const report = command === 'api-info'
           ? apiInfo
-          : { ok: true, command, exitCode: 0, errors: [], warnings: [], outputs: [] })
-        child.emit('close', 0)
+          : documentReport?.({ command, args }) ?? { ok: true, command, exitCode: 0, errors: [], warnings: [], outputs: [] }
+        await writeJson(argument('--result-json'), report)
+        child.emit('close', report.exitCode ?? 0)
       } catch (error) {
         child.emit('error', error)
       }
@@ -77,13 +83,14 @@ async function mockPortableApplication(t, directory, apiInfo) {
 }
 
 function createSchemaInput(schemaVersion) {
-  const { envelope } = buildQuotationEnvelope({
+  const { envelope: persisted } = buildQuotationEnvelope({
     header: { quotationNumber: 'Q-1', currency: 'USD', documentLocale: 'en-US' },
     majorItems: [{ id: 'line-1', name: 'Valve', quantity: 2, unitCost: 50, costCurrency: 'USD' }],
   }, new Date('2026-10-12T08:00:00.000Z'))
-  envelope.schemaVersion = schemaVersion
+  const envelope = decodeQuotationEnvelope(persisted)
+  envelope.schemaVersion = schemaVersion === 4 ? 3 : schemaVersion
   delete envelope.revisions
-  if (schemaVersion === 3) {
+  if (schemaVersion >= 3) {
     const snapshot = structuredClone(envelope.quotation)
     snapshot.header.revisionNumber = 1
     envelope.quotation.header.revisionNumber = 2
@@ -92,8 +99,307 @@ function createSchemaInput(schemaVersion) {
       note: 'Original offer', quotation: snapshot,
     }]
   }
+  return schemaVersion === 4 ? encodeQuotationEnvelope(envelope) : envelope
+}
+
+const summaryApiInfo = {
+  apiVersion: '2.2.0', appVersion: '0.1.0', quotationSchemaVersion: 3,
+  commands: ['validate', 'render', 'batch'],
+}
+
+function addSummarySettings(envelope, { archivedOnly = false } = {}) {
+  const quotation = archivedOnly ? envelope.revisions[0].quotation : envelope.quotation
+  quotation.outputSettings = {
+    itemDetailLevel: 2,
+    subtotalLabel: '  Materials selling total  ',
+    informationalTotalsNote: '  Included in the subtotal.\n请勿重复相加。  ',
+    showInformationalTotals: false,
+    informationalTotals: [{
+      id: 'summary-1', label: '  阀门与管道  ', source: 'items',
+      sectionIds: ['old-section', 'old-section'], itemIds: ['line-1', 'line-1'], visible: false,
+    }],
+  }
   return envelope
 }
+
+function stripWorkingSummarySettings(envelope) {
+  envelope.quotation.outputSettings = { itemDetailLevel: envelope.quotation.outputSettings.itemDetailLevel }
+  return envelope
+}
+
+function argumentValue(args, flag) {
+  return args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined
+}
+
+async function assertSummaryProbeFilesRemoved(calls) {
+  const probes = calls.filter(args => argumentValue(args, '--input')?.includes('summary-input'))
+  assert.ok(probes.length > 0)
+  for (const args of probes) {
+    for (const flag of ['--input', '--output-json', '--result-json']) {
+      await assert.rejects(readFile(argumentValue(args, flag)), { code: 'ENOENT' })
+    }
+    assert.ok(args.includes('--no-network'))
+    assert.ok(!args.includes('--quotation-pdf'))
+    assert.ok(!args.includes('--goods-receipt-pdf'))
+  }
+}
+
+test('blocks summary-enabled validation and rendering on an app with matching old API/schema versions', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, { normalizeInput: stripWorkingSummarySettings })
+  const inputFile = join(directory, 'quotation.json')
+  const outputJson = join(directory, 'normalized.json')
+  const quotationPdf = join(directory, 'quotation.pdf')
+  const resultJson = join(directory, 'requested-result.json')
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  const before = await readFile(inputFile, 'utf8')
+  const configBefore = await readFile(configPath, 'utf8')
+  for (const run of [validateDocument, renderDocuments]) {
+    await assert.rejects(run({ inputFile, outputJson, quotationPdf, resultJson, configPath }), error => {
+      assert.ok(error instanceof QuotationSoftwareExecutionError)
+      assert.equal(error.exitCode, 3)
+      assert.equal(error.report.errors[0].code, 'quotation_summary_settings_unsupported')
+      assert.match(error.message, /configure-current/)
+      assert.match(error.message, /Keep the JSON and revision history unchanged/)
+      assert.deepEqual(error.report.outputs, [])
+      return true
+    })
+  }
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate', 'api-info', 'validate'])
+  assert.equal(await readFile(inputFile, 'utf8'), before)
+  assert.equal(await readFile(configPath, 'utf8'), configBefore)
+  for (const filePath of [outputJson, quotationPdf, resultJson]) await assert.rejects(readFile(filePath), { code: 'ENOENT' })
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+for (const [key, value] of [
+  ['subtotalLabel', ''], ['showInformationalTotals', false], ['informationalTotals', []],
+  ['informationalTotalsNote', '  Custom reminder.\n第二行。  '], ['informationalTotalsNote', ''], ['informationalTotalsNote', '  \n  '],
+]) {
+  test(`checks compatibility when only ${key} is supplied (${JSON.stringify(value)})`, async (t) => {
+    const directory = await createTestDirectory(t)
+    const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, { normalizeInput: stripWorkingSummarySettings })
+    const inputFile = join(directory, 'quotation.json')
+    const input = createSchemaInput(3)
+    input.quotation.outputSettings[key] = value
+    await writeJson(inputFile, input)
+    await assert.rejects(validateDocument({ inputFile, configPath }), error => error.report?.errors[0]?.code === 'quotation_summary_settings_unsupported')
+    assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate'])
+    await assertSummaryProbeFilesRemoved(calls)
+  })
+}
+
+test('accepts a supporting app, allowing ID deduplication and preserving raw labels and archived settings', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+    normalizeInput: envelope => {
+      for (const row of envelope.quotation.outputSettings.informationalTotals ?? []) {
+        row.sectionIds = [...new Set(row.sectionIds)]
+        if (row.itemIds) row.itemIds = [...new Set(row.itemIds)]
+      }
+      return envelope
+    },
+  })
+  const inputFile = join(directory, 'quotation.json')
+  const outputJson = join(directory, 'normalized.json')
+  const quotationPdf = join(directory, 'quotation.pdf')
+  const input = addSummarySettings(createSchemaInput(3))
+  input.revisions[0].quotation.outputSettings = structuredClone(input.quotation.outputSettings)
+  await writeJson(inputFile, input)
+  const before = await readFile(inputFile, 'utf8')
+  for (const run of [validateDocument, renderDocuments]) {
+    assert.equal((await run({ inputFile, outputJson, quotationPdf, configPath, force: true })).ok, true)
+    const normalized = JSON.parse(await readFile(outputJson, 'utf8'))
+    assert.equal(normalized.quotation.outputSettings.subtotalLabel, input.quotation.outputSettings.subtotalLabel)
+    assert.equal(normalized.quotation.outputSettings.informationalTotalsNote, input.quotation.outputSettings.informationalTotalsNote)
+    assert.equal(normalized.quotation.outputSettings.informationalTotals[0].label, input.quotation.outputSettings.informationalTotals[0].label)
+    assert.deepEqual(normalized.quotation.outputSettings.informationalTotals[0].itemIds, ['line-1'])
+    assert.deepEqual(normalized.revisions, input.revisions)
+  }
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate', 'validate', 'api-info', 'validate', 'render'])
+  assert.equal(await readFile(inputFile, 'utf8'), before)
+  assert.ok(calls.filter(args => ['render', 'validate'].includes(args[1]) && !argumentValue(args, '--input').includes('summary-input'))
+    .every(args => argumentValue(args, '--input') === inputFile))
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+test('checks archived-only summary settings through the working normalizer without changing history', async (t) => {
+  const directory = await createTestDirectory(t)
+  let mirroredSettings
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+    normalizeInput: envelope => {
+      mirroredSettings = structuredClone(envelope.quotation.outputSettings)
+      return stripWorkingSummarySettings(envelope)
+    },
+  })
+  const inputFile = join(directory, 'quotation.json')
+  const input = addSummarySettings(createSchemaInput(3), { archivedOnly: true })
+  await writeJson(inputFile, input)
+  const before = await readFile(inputFile, 'utf8')
+  await assert.rejects(validateDocument({ inputFile, configPath }), error => {
+    assert.equal(error.report.errors[0].code, 'quotation_summary_settings_unsupported')
+    assert.match(error.report.errors[0].fieldPath, /^revisions\[0\]\.quotation\.outputSettings/)
+    return true
+  })
+  assert.equal(mirroredSettings.informationalTotals[0].source, 'items')
+  assert.equal(mirroredSettings.subtotalLabel, input.revisions[0].quotation.outputSettings.subtotalLabel)
+  assert.equal(await readFile(inputFile, 'utf8'), before)
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+test('checks advanced archived item settings even when the working draft only uses sections', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+    normalizeInput: envelope => {
+      for (const row of envelope.quotation.outputSettings.informationalTotals ?? []) {
+        delete row.source
+        delete row.itemIds
+      }
+      return envelope
+    },
+  })
+  const inputFile = join(directory, 'quotation.json')
+  const input = addSummarySettings(createSchemaInput(3), { archivedOnly: true })
+  input.quotation.outputSettings = {
+    itemDetailLevel: 3, showInformationalTotals: false,
+    informationalTotals: [{ id: 'summary-1', label: 'Section summary', sectionIds: [], visible: false }],
+  }
+  await writeJson(inputFile, input)
+  const before = await readFile(inputFile, 'utf8')
+  await assert.rejects(renderDocuments({ inputFile, outputJson: join(directory, 'output.json'), configPath }), error => {
+    assert.equal(error.report.errors[0].code, 'quotation_summary_settings_unsupported')
+    assert.ok(error.report.errors[0].details.changedFields.includes('revisions[0].quotation.outputSettings.informationalTotals[0].source'))
+    return true
+  })
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate'])
+  assert.equal(await readFile(inputFile, 'utf8'), before)
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+test('rejects dropped archive-only blank notes even when the app preserves saved snapshots verbatim', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+    normalizeInput: envelope => {
+      delete envelope.quotation.outputSettings.informationalTotalsNote
+      return envelope
+    },
+  })
+  const inputFile = join(directory, 'quotation.json')
+  const input = createSchemaInput(3)
+  input.revisions[0].quotation.outputSettings.informationalTotalsNote = ''
+  await writeJson(inputFile, input)
+  const before = await readFile(inputFile, 'utf8')
+  await assert.rejects(validateDocument({ inputFile, configPath }), error => {
+    assert.equal(error.report.errors[0].code, 'quotation_summary_settings_unsupported')
+    assert.equal(error.report.errors[0].fieldPath, 'revisions[0].quotation.outputSettings.informationalTotalsNote')
+    return true
+  })
+  assert.equal(await readFile(inputFile, 'utf8'), before)
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate'])
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+test('preflights every unique summary batch input before starting any requested job', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+    normalizeInput: envelope => envelope.quotation.outputSettings.subtotalLabel === 'Unsupported'
+      ? stripWorkingSummarySettings(envelope) : envelope,
+  })
+  const manifestFile = join(directory, 'batch', 'jobs.json')
+  const inputs = [createSchemaInput(3), addSummarySettings(createSchemaInput(3)), addSummarySettings(createSchemaInput(3))]
+  inputs[2].quotation.outputSettings.subtotalLabel = 'Unsupported'
+  const inputPaths = inputs.map((_, index) => join(dirname(manifestFile), `${index}.json`))
+  for (const [index, input] of inputs.entries()) await writeJson(inputPaths[index], input)
+  await writeJson(manifestFile, { schemaVersion: 1, jobs: [0, 1, 2, 2].map((inputIndex, index) => ({
+    id: `job-${index}`, command: 'render', input: `${inputIndex}.json`, outputJson: `output-${index}.json`,
+  })) })
+  const before = await Promise.all([...inputPaths, manifestFile].map(filePath => readFile(filePath, 'utf8')))
+  await assert.rejects(runAutomationBatch({ manifestFile, configPath }), error => {
+    assert.equal(error.report.errors.length, 2)
+    assert.deepEqual(error.report.errors.map(issue => issue.fieldPath), ['jobs[2].input', 'jobs[3].input'])
+    assert.deepEqual(error.report.errors.map(issue => issue.details.jobId), ['job-2', 'job-3'])
+    assert.ok(error.report.errors.every(issue => issue.code === 'quotation_summary_settings_unsupported'))
+    return true
+  })
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate', 'validate'])
+  assert.deepEqual(await Promise.all([...inputPaths, manifestFile].map(filePath => readFile(filePath, 'utf8'))), before)
+  for (let index = 0; index < 4; index++) await assert.rejects(readFile(join(dirname(manifestFile), `output-${index}.json`)), { code: 'ENOENT' })
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+test('starts a compatible summary batch after checking repeated inputs once', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo)
+  const inputFile = join(directory, 'quotation.json')
+  const manifestFile = join(directory, 'jobs.json')
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  await writeJson(manifestFile, { schemaVersion: 1, jobs: [1, 2].map(index => ({
+    id: `job-${index}`, command: 'validate', input: 'quotation.json',
+  })) })
+  assert.equal((await runAutomationBatch({ manifestFile, configPath })).ok, true)
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate', 'batch'])
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+test('pins the same executable for summary probing and the requested command when configuration changes', async (t) => {
+  const directory = await createTestDirectory(t)
+  const replacementPath = join(directory, 'replacement.exe')
+  await writeFile(replacementPath, '')
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+    normalizeInput: async envelope => {
+      await writeJson(join(directory, 'config.json'), { schemaVersion: 1, setupAcknowledged: true, softwarePath: replacementPath })
+      return envelope
+    },
+  })
+  const inputFile = join(directory, 'quotation.json')
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  const report = await validateDocument({ inputFile, configPath })
+  assert.equal(report.softwarePath, join(directory, 'mock-portable.exe'))
+  assert.equal((await getSoftwareStatus(configPath)).softwarePath, replacementPath)
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate', 'validate'])
+  await assertSummaryProbeFilesRemoved(calls)
+})
+
+for (const [name, alter] of [
+  ['raw subtotal label', settings => { settings.subtotalLabel = settings.subtotalLabel.trim() }],
+  ['raw multiline breakdown note', settings => { settings.informationalTotalsNote = settings.informationalTotalsNote.trim() }],
+  ['raw row label', settings => { settings.informationalTotals[0].label = settings.informationalTotals[0].label.trim() }],
+  ['row order', settings => { settings.informationalTotals.reverse() }],
+  ['default section source', settings => { settings.informationalTotals[0].source = 'items' }],
+  ['inactive item IDs', settings => { settings.informationalTotals[0].itemIds = ['injected-item'] }],
+]) {
+  test(`refuses an app that alters ${name}`, async (t) => {
+    const directory = await createTestDirectory(t)
+    const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+      normalizeInput: envelope => { alter(envelope.quotation.outputSettings); return envelope },
+    })
+    const inputFile = join(directory, 'quotation.json')
+    const input = addSummarySettings(createSchemaInput(3))
+    delete input.quotation.outputSettings.informationalTotals[0].source
+    delete input.quotation.outputSettings.informationalTotals[0].itemIds
+    input.quotation.outputSettings.informationalTotals.push({ id: 'second', label: 'Other', sectionIds: [], visible: false })
+    await writeJson(inputFile, input)
+    await assert.rejects(validateDocument({ inputFile, configPath }), error => error.report?.errors[0]?.code === 'quotation_summary_settings_unsupported')
+    assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate'])
+    await assertSummaryProbeFilesRemoved(calls)
+  })
+}
+
+test('cleans probe files and retains authoritative validation errors when round-trip checking fails', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, {
+    documentReport: ({ command }) => ({ ok: false, command, exitCode: 3, errors: [{ code: 'quotation_number_required', message: 'A quotation number is required.' }], warnings: [], outputs: [] }),
+  })
+  const inputFile = join(directory, 'quotation.json')
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  await assert.rejects(validateDocument({ inputFile, configPath }), error => {
+    assert.equal(error.report.errors[0].code, 'quotation_summary_settings_check_failed')
+    assert.equal(error.report.errors[0].details.validationReport.errors[0].code, 'quotation_number_required')
+    return true
+  })
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'validate'])
+  await assertSummaryProbeFilesRemoved(calls)
+})
 
 test('blocks schema 3 document jobs on a schema 2 portable without changing files or history', async (t) => {
   const directory = await createTestDirectory(t)
@@ -204,6 +510,68 @@ test('refuses an app with unknown schema support before opening a quotation', as
     return true
   })
   assert.deepEqual(calls.map(args => args[1]), ['api-info'])
+})
+
+test('blocks schema 4 validation, render and mixed batch inputs on a schema 3 application', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo)
+  const inputFile = join(directory, 'shared-images.json')
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(4)))
+  const before = await readFile(inputFile, 'utf8')
+  for (const run of [validateDocument, renderDocuments]) {
+    await assert.rejects(run({ inputFile, outputJson: join(directory, 'normalized.json'), configPath, noNetwork: true }), error => {
+      assert.equal(error.report.errors[0].code, 'quotation_schema_unsupported')
+      assert.equal(error.report.errors[0].details.inputSchemaVersion, 4)
+      return true
+    })
+  }
+  await writeJson(join(directory, 'legacy.json'), createSchemaInput(3))
+  const manifestFile = join(directory, 'jobs.json')
+  await writeJson(manifestFile, { schemaVersion: 1, jobs: [
+    { command: 'validate', input: 'legacy.json' },
+    { command: 'render', input: 'shared-images.json' },
+  ] })
+  await assert.rejects(runAutomationBatch({ manifestFile, configPath }), error => {
+    assert.equal(error.report.errors[0].fieldPath, 'jobs[1].input')
+    return true
+  })
+  assert.deepEqual(calls.map(args => args[1]), ['api-info', 'api-info', 'api-info'])
+  assert.equal(await readFile(inputFile, 'utf8'), before)
+})
+
+test('summary compatibility decodes v4 output and keeps shared images in its v4 probe', async (t) => {
+  const directory = await createTestDirectory(t)
+  let probeSeen = false
+  const { configPath } = await mockPortableApplication(t, directory, { ...summaryApiInfo, quotationSchemaVersion: 4 }, {
+    normalizeInput: (envelope, { args }) => {
+      if (argumentValue(args, '--input').includes('summary-input')) {
+        if (envelope.schemaVersion === 4) {
+          assert.deepEqual(envelope.images, { 'image-1': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6n6sAAAAASUVORK5CYII=' })
+          assert.equal(envelope.quotation.branding.logoImageId, 'image-1')
+          probeSeen = true
+        }
+      }
+      return encodeQuotationEnvelope(envelope)
+    },
+  })
+  for (const version of [2, 3, 4]) {
+    const input = addSummarySettings(createSchemaInput(version))
+    if (version === 4) {
+      input.images = { 'image-1': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6n6sAAAAASUVORK5CYII=' }
+      input.quotation.branding.logoImageId = 'image-1'
+      input.revisions[0].quotation.branding.logoImageId = 'image-1'
+    }
+    const inputFile = join(directory, `input-${version}.json`)
+    const outputJson = join(directory, `output-${version}.json`)
+    await writeJson(inputFile, input)
+    const before = await readFile(inputFile, 'utf8')
+    assert.equal((await validateDocument({ inputFile, outputJson, configPath })).ok, true)
+    const output = JSON.parse(await readFile(outputJson, 'utf8'))
+    assert.equal(output.schemaVersion, 4)
+    assert.deepEqual(decodeQuotationEnvelope(output).quotation, decodeQuotationEnvelope(input).quotation)
+    assert.equal(await readFile(inputFile, 'utf8'), before)
+  }
+  assert.equal(probeSeen, true)
 })
 
 test('keeps direct executable configuration compatible', async (t) => {

@@ -8,11 +8,14 @@ import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
-import { validateQuotationJsonContent } from './quotation-json.mjs'
+import { validateQuotationJsonContent, decodeQuotationEnvelope, encodeQuotationEnvelope } from './quotation-json.mjs'
 
 const configSchemaVersion = 1
 const softwareManifestSchemaVersion = 1
-const apiProbeTimeoutMs = 15_000
+const apiProbeTimeoutMs = 60_000
+const summaryCheckTimeoutMs = 60_000
+const summarySettingKeys = ['subtotalLabel', 'informationalTotalsNote', 'showInformationalTotals', 'informationalTotals']
+const compatibilityRemedy = 'Build the current portable application (npm run package:win:portable:current) and use configure-current with its release/current-portable.json, or configure a compatible .exe. Keep the JSON and revision history unchanged; no requested document jobs were started.'
 
 export class QuotationSoftwareExecutionError extends Error {
   constructor(message, exitCode, report = null) {
@@ -153,8 +156,9 @@ async function probeSoftwareApi(status, probeDirectory) {
 
 async function assertInputSchemaCompatibility(command, apiInfo, inputs) {
   const supportedSchemaVersion = apiInfo.quotationSchemaVersion
-  const remedy = 'Build the current portable application (npm run package:win:portable:current) and use configure-current with its release/current-portable.json, or configure a compatible .exe. Keep the JSON and revision history unchanged; no document jobs were started.'
+  const remedy = compatibilityRemedy
   const errors = []
+  const parsedInputs = []
   if (!Number.isInteger(supportedSchemaVersion) || supportedSchemaVersion < 1) {
     errors.push({
       code: 'quotation_schema_unknown',
@@ -175,6 +179,7 @@ async function assertInputSchemaCompatibility(command, apiInfo, inputs) {
         })
         continue
       }
+      parsedInputs.push({ inputFile, jobId, fieldPath, input })
       if (typeof input?.schemaVersion === 'number' && input.schemaVersion > supportedSchemaVersion) {
         errors.push({
           code: 'quotation_schema_unsupported',
@@ -203,6 +208,158 @@ async function assertInputSchemaCompatibility(command, apiInfo, inputs) {
       outputs: [],
     })
   }
+  return parsedInputs
+}
+
+async function assertSummarySettingsCompatibility(command, apiInfo, inputs, timeoutMs) {
+  const checkedInputs = new Map()
+  const errors = []
+  for (const { inputFile, jobId, fieldPath, input } of inputs) {
+    if (!getSummaryDocuments(input).some(({ quotation }) => hasSummarySettings(quotation))) continue
+    if (!checkedInputs.has(inputFile)) {
+      checkedInputs.set(inputFile, await checkSummarySettingsRoundTrip(apiInfo.softwarePath, inputFile, input, timeoutMs))
+    }
+    const issue = checkedInputs.get(inputFile)
+    if (issue) errors.push({
+      ...issue,
+      fieldPath: jobId ? fieldPath : issue.fieldPath,
+      details: { ...issue.details, inputFile, ...(jobId ? { jobId } : {}) },
+    })
+  }
+  if (errors.length > 0) {
+    throw new QuotationSoftwareExecutionError(errors.map(error => error.message).join('\n'), 3, {
+      ok: false, command, exitCode: 3,
+      apiVersion: apiInfo.apiVersion,
+      quotationSchemaVersion: apiInfo.quotationSchemaVersion,
+      softwarePath: apiInfo.softwarePath,
+      errors, warnings: [], outputs: [],
+    })
+  }
+}
+
+async function checkSummarySettingsRoundTrip(softwarePath, inputFile, input, timeoutMs) {
+  const probeInputJson = createTemporaryReportPath('summary-input')
+  const outputJson = createTemporaryReportPath('summary-roundtrip')
+  const resultJson = createTemporaryReportPath('summary-check')
+  let report = null
+  try {
+    const { probe, fieldOrigins } = createSummarySettingsProbe(input)
+    await writeFile(probeInputJson, `${JSON.stringify(probe)}\n`, 'utf8')
+    const effectiveTimeoutMs = timeoutMs ?? summaryCheckTimeoutMs
+    const processResult = await runExecutable(softwarePath, createAutomationArguments({
+      command: 'validate', inputFile: probeInputJson, outputJson, resultJson,
+      noNetwork: true, timeoutMs: effectiveTimeoutMs,
+    }), effectiveTimeoutMs)
+    report = await readJsonIfPresent(resultJson) ?? parseStdoutReport(processResult.stdout)
+    if (processResult.exitCode !== 0 || report?.ok !== true) {
+      throw new Error(formatExecutionError(report, processResult))
+    }
+    const normalized = await readJson(outputJson)
+    const changedFields = [...new Set(findChangedSummarySettings(probe, normalized).map(fieldPath => {
+      const origin = fieldOrigins.find(([probePath]) => fieldPath === probePath
+        || fieldPath.startsWith(`${probePath}.`) || fieldPath.startsWith(`${probePath}[`))
+      return origin ? `${origin[1]}${fieldPath.slice(origin[0].length)}` : fieldPath
+    }))]
+    if (changedFields.length > 0) return {
+      code: 'quotation_summary_settings_unsupported',
+      message: `The configured application dropped or changed quotation summary settings in ${inputFile} (${changedFields[0]}${changedFields.length > 1 ? ` and ${changedFields.length - 1} more fields` : ''}). ${compatibilityRemedy}`,
+      fieldPath: changedFields[0],
+      details: { changedFields },
+    }
+    return null
+  } catch (error) {
+    return {
+      code: 'quotation_summary_settings_check_failed',
+      message: `Could not verify quotation summary settings for ${inputFile}: ${error.message}. ${compatibilityRemedy}`,
+      fieldPath: 'quotation.outputSettings',
+      details: { ...(report ? { validationReport: report } : {}) },
+    }
+  } finally {
+    await Promise.all([probeInputJson, outputJson, resultJson].map(filePath => unlink(filePath).catch(() => undefined)))
+  }
+}
+
+function createSummarySettingsProbe(input) {
+  const probe = decodeQuotationEnvelope(input)
+  const settings = probe.quotation.outputSettings ??= { itemDetailLevel: 3 }
+  const fieldOrigins = []
+  const rowIds = new Set((settings.informationalTotals ?? []).map(row => row.id))
+  // Older applications preserve archived snapshots verbatim. Mirror their
+  // requested settings into the working draft to exercise actual normalization.
+  for (const { quotation, fieldPath } of getSummaryDocuments(input).slice(1)) {
+    if (!hasSummarySettings(quotation)) continue
+    for (const key of summarySettingKeys) {
+      if (!Object.hasOwn(quotation.outputSettings, key)) continue
+      if (!Object.hasOwn(settings, key)) {
+        settings[key] = key === 'informationalTotals' ? [] : quotation.outputSettings[key]
+        fieldOrigins.push([`quotation.outputSettings.${key}`, `${fieldPath}.outputSettings.${key}`])
+      }
+      if (key !== 'informationalTotals') continue
+      quotation.outputSettings.informationalTotals.forEach((row, index) => {
+        const mirroredRow = structuredClone(row)
+        if (rowIds.has(mirroredRow.id)) mirroredRow.id = `summary-probe-${randomUUID()}`
+        rowIds.add(mirroredRow.id)
+        fieldOrigins.push([
+          `quotation.outputSettings.informationalTotals[${settings.informationalTotals.length}]`,
+          `${fieldPath}.outputSettings.informationalTotals[${index}]`,
+        ])
+        settings.informationalTotals.push(mirroredRow)
+      })
+    }
+  }
+  // Prefer the row-specific origin over its containing array's origin.
+  fieldOrigins.sort((left, right) => right[0].length - left[0].length)
+  return { probe: input.schemaVersion === 4 ? encodeQuotationEnvelope(probe) : probe, fieldOrigins }
+}
+
+function getSummaryDocuments(envelope) {
+  return [
+    { id: `working:${envelope?.quotation?.id}`, quotation: envelope?.quotation, fieldPath: 'quotation' },
+    ...(Array.isArray(envelope?.revisions) ? envelope.revisions.map((revision, index) => ({
+      id: `revision:${revision?.id}`, quotation: revision?.quotation, fieldPath: `revisions[${index}].quotation`,
+    })) : []),
+  ]
+}
+
+function hasSummarySettings(quotation) {
+  return summarySettingKeys.some(key => Object.hasOwn(quotation?.outputSettings ?? {}, key))
+}
+
+function findChangedSummarySettings(input, normalized) {
+  input = decodeQuotationEnvelope(input)
+  normalized = decodeQuotationEnvelope(normalized)
+  const normalizedDocuments = new Map(getSummaryDocuments(normalized).map(document => [document.id, document.quotation]))
+  const changedFields = []
+  for (const { id, quotation, fieldPath } of getSummaryDocuments(input)) {
+    if (!hasSummarySettings(quotation)) continue
+    const expected = quotation.outputSettings
+    const actual = normalizedDocuments.get(id)?.outputSettings
+    for (const key of summarySettingKeys) {
+      if (!Object.hasOwn(expected, key)) continue
+      const settingPath = `${fieldPath}.outputSettings.${key}`
+      if (key !== 'informationalTotals' || !Array.isArray(expected[key]) || !Array.isArray(actual?.[key])) {
+        if (JSON.stringify(expected[key]) !== JSON.stringify(actual?.[key])) changedFields.push(settingPath)
+        continue
+      }
+      const actualRows = new Map(actual[key].map(row => [row?.id, row]))
+      if (JSON.stringify(actual[key].map(row => row?.id)) !== JSON.stringify(expected[key].map(row => row?.id))) {
+        changedFields.push(settingPath)
+      }
+      expected[key].forEach((row, index) => {
+        const actualRow = actualRows.get(row?.id)
+        for (const field of ['id', 'label', 'sectionIds', 'visible', 'source', 'itemIds']) {
+          const expectedField = field === 'source' ? row.source ?? 'sections' : field === 'itemIds' ? row.itemIds ?? [] : row[field]
+          const actualField = field === 'source' ? actualRow?.source ?? 'sections' : field === 'itemIds' ? actualRow?.itemIds ?? [] : actualRow?.[field]
+          const expectedValue = Array.isArray(expectedField) ? [...new Set(expectedField)] : expectedField
+          const actualValue = Array.isArray(actualField) ? [...new Set(actualField)] : actualField
+          if (JSON.stringify(expectedValue) !== JSON.stringify(actualValue)) {
+            changedFields.push(`${settingPath}[${index}].${field}`)
+          }
+        }
+      })
+    }
+  }
+  return changedFields
 }
 
 export async function validateDocument({
@@ -318,7 +475,8 @@ export async function runAutomationBatch({
         }]
       : []
   ))
-  await assertInputSchemaCompatibility('batch', apiInfo, inputs)
+  const parsedInputs = await assertInputSchemaCompatibility('batch', apiInfo, inputs)
+  await assertSummarySettingsCompatibility('batch', apiInfo, parsedInputs, timeoutMs)
 
   const args = createBatchArguments({
     manifestFile: resolvedManifestFile,
@@ -412,7 +570,8 @@ async function runAutomationDocument({
     if (outputPath) await mkdir(dirname(outputPath), { recursive: true })
   }
   const apiInfo = await probeSoftwareApi(status, dirname(effectiveResultJson))
-  await assertInputSchemaCompatibility(command, apiInfo, [{ inputFile: resolvedInputFile }])
+  const parsedInputs = await assertInputSchemaCompatibility(command, apiInfo, [{ inputFile: resolvedInputFile }])
+  await assertSummarySettingsCompatibility(command, apiInfo, parsedInputs, timeoutMs)
 
   try {
     const processResult = await runExecutable(status.softwarePath, args)
@@ -745,7 +904,7 @@ export function runExecutable(executablePath, args, executionTimeoutMs) {
     child.once('error', error => finish(() => reject(error)))
     child.once('close', exitCode => finish(() => {
       if (timedOut) {
-        reject(new Error(`Quotation Software did not exit within ${executionTimeoutMs} ms. The executable may predate the stable automation CLI.`))
+        reject(new Error(`Quotation Software did not exit within ${executionTimeoutMs} ms. The operation timed out; this does not establish that the executable is outdated or incompatible.`))
         return
       }
       resolvePromise({ exitCode, stdout, stderr })

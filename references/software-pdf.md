@@ -16,9 +16,13 @@ Check configuration at the start of a skill invocation:
 node <skill-folder>\scripts\quotation-software.mjs status
 ```
 
-`status` resolves the current manifest and confirms that its selected executable exists; `usable: true` is not a schema-compatibility claim. Before validation or rendering, the helper probes `--automation api-info` with a bounded timeout and temporary result file, then checks the input schema against the reported `quotationSchemaVersion`. Batch jobs are all checked before any job runs. One operation pins the resolved executable for both probe and execution, even if the manifest changes. A schema-2 executable cannot process schema-3 history; do not remove history or relabel the file to get past that check.
+`status` resolves the current manifest and confirms that its selected executable exists; `usable: true` is not a schema-compatibility claim. Before validation or rendering, the helper probes `--automation api-info` with a bounded timeout and temporary result file, then checks the input schema against the reported `quotationSchemaVersion`. Batch jobs are all checked before any job runs. One operation pins the resolved executable for both probe and execution, even if the manifest changes. A schema-2/3 executable cannot process schema-4 image references; do not remove history or relabel the file to get past that check.
 
-Use `node <skill-folder>\scripts\quotation-software.mjs api-info` to inspect the configured build. API 2.1 plus schema 3 is sufficient for ordinary CLI validation/rendering; API 2.2 adds renderer revision deletion. A source checkout update does not automatically rebuild the portable executable. If the selected build is old, keep the valid JSON and report PDF/application validation as pending until a current build is available.
+Use `node <skill-folder>\scripts\quotation-software.mjs api-info` to inspect the configured build. Newly generated files require reported schema support of 4 or later; legacy v2/v3 files may still be read by compatible older builds. API 2.2 adds renderer revision deletion. A source checkout update does not automatically rebuild the portable executable. If the selected build is old, keep the valid JSON and report PDF/application validation as pending until a current build is available.
+
+Custom subtotal wording, editable breakdown notes, and informational section/item totals were added without changing schema 3 or API 2.2.0. For files using any of these settings, the helper also performs a temporary, no-network `validate --output-json` round trip and checks that the working quotation and saved revisions retain their summary settings. Requested validation/render/batch jobs start only after these checks succeed. The temporary files are cleaned up; the source JSON is unchanged. Duplicate selected IDs may be normalized, but labels, raw note text (including blanks and line breaks), visibility, source choices, and retained selections must survive. The probe retains schema-v4 shared images, expands normalized output for comparison, and never counts repeated decoded logos toward the stored size limit. A quotation number is needed for the application's output-JSON validation step.
+
+An older executable that drops the settings is incompatible even if its schema/API numbers match. Keep the independently validated JSON and report app validation/PDF export as pending; rebuilding the portable application is separate work. Do not remove the new settings to make an old build accept the file. In an already open editor, verify the serialized settings and preview before delivering these features.
 
 When `setupAcknowledged` is `false`, ask the user once for the full path to the portable `.exe`, while continuing any JSON-generation work. The software question must never become a prerequisite for JSON.
 
@@ -70,7 +74,7 @@ The application reports stable issue codes and field paths. Fix its errors befor
 
 ## Render sequence
 
-Build and validate schema-v3 JSON before rendering. This ordering preserves the JSON artifact even if the application is absent, moved, incompatible, or fails. Existing legacy-v2 files may still be validated/rendered unchanged by a compatible older app.
+Build and validate schema-v4 JSON before rendering. This ordering preserves the JSON artifact even if the application is absent, moved, incompatible, or fails. Existing legacy-v2/v3 files may still be validated/rendered unchanged by a compatible older app.
 
 Export either or both documents:
 
@@ -90,7 +94,7 @@ The portable CLI renders the working quotation. It has no saved-revision selecti
 
 Optional controls:
 
-- `--force` (or `--overwrite`) replaces existing outputs using the application's backup behavior.
+- `--force` (or `--overwrite`) atomically replaces existing outputs without creating `.backup` copies in current builds; pre-existing backups remain unchanged.
 - `--timeout-ms <1-600000>` changes the per-phase timeout.
 - `--progress-json <path>` writes structured progress at phase boundaries.
 - `--cancel-file <path>` cancels safely when the file appears between phases.
@@ -115,8 +119,9 @@ Manifest schema and limits follow the configured application's `api-info`: schem
 ## Failure behavior
 
 - If configuration is missing or the executable moved, keep and deliver the validated JSON, explain why PDF was not produced, and ask for a new `.exe` path only when the user still wants PDF.
-- If the API-info compatibility probe fails or times out, do not retry by opening the GUI. The configured executable is outdated or incompatible; rebuild/configure the current portable application.
+- The API-info probe allows 60 seconds for portable startup. If it fails or times out, compatibility is unverified; a timeout alone does not prove the executable is outdated. Inspect the failure before recommending a rebuild. Do not retry by opening the GUI.
 - `quotation_schema_unsupported` or `quotation_schema_unknown` (exit code 3) means compatibility could not be established before execution. Keep the input and all history unchanged. Do not rebuild/configure software unless that work is part of the user's request.
+- `quotation_summary_settings_unsupported` means the configured build did not retain the requested summary settings. `quotation_summary_settings_check_failed` means its temporary compatibility validation could not finish; inspect the included validation details. Neither is permission to strip settings or saved history. Keep the valid JSON and report application/PDF verification as pending.
 - If the application returns a nonzero automation exit code, keep the JSON and report its structured errors. Never claim that a PDF exists without checking the output file.
 - The helper preserves the application's stable exit codes (`2` through `7`) so callers can distinguish usage, input, network, filesystem, rendering, and internal failures.
 - Do not substitute browser printing, HTML-to-PDF tools, screenshots, office converters, or a separately recreated PDF template. PDF output must come from the configured Quotation Software application.
