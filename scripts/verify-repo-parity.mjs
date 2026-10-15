@@ -232,7 +232,7 @@ try {
   const revisionInput = decodeQuotationEnvelope(persistedRevisionInput)
   assert.deepEqual(revisionInput.revisions, [], 'new document has no saved revisions')
   revisionInput.quotation = JSON.parse(JSON.stringify(
-    parseQuotationDocumentContent(JSON.stringify(revisionInput)).quotation,
+    parseQuotationDocumentContent(JSON.stringify(persistedRevisionInput)).quotation,
   ))
   const archived = structuredClone(revisionInput.quotation)
   archived.header.revisionNumber = 1
@@ -269,18 +269,19 @@ try {
   }
 
   let revisionCases = 0
-  function readDocument(name, envelope) {
+  function readDocument(name, runtime) {
+    const envelope = encodeQuotationEnvelope(runtime)
     assert.deepEqual(validateQuotationEnvelope(envelope).errors, [], `${name}: offline validation`)
     const document = parseQuotationDocumentContent(JSON.stringify(envelope))
     assert.deepEqual(document.revisions, decodeQuotationEnvelope(envelope).revisions, `${name}: exact archived content on import`)
     return document
   }
   const beforeRebuild = structuredClone(revisionInput)
-  readDocument('schema 3 archived blanks', revisionInput)
-  const rebuilt = decodeQuotationEnvelope(buildQuotationEnvelope(revisionInput, now).envelope)
+  readDocument('schema 4 archived blanks', revisionInput)
+  const rebuilt = decodeQuotationEnvelope(buildQuotationEnvelope(encodeQuotationEnvelope(revisionInput), now).envelope)
   assert.deepEqual(rebuilt.revisions, revisionInput.revisions, 'builder preserves archived blanks and receipt snapshots')
   assert.deepEqual(revisionInput, beforeRebuild, 'builder does not mutate input history')
-  readDocument('rebuilt schema 3 history', rebuilt)
+  readDocument('rebuilt schema 4 history', rebuilt)
   revisionCases += 1
 
   function checkRevisionProposal(name, input, result, options, timestamp) {
@@ -304,7 +305,7 @@ try {
   const createAt = new Date('2026-10-12T08:00:00.000Z')
   const createOptions = { note: '  Customer update  ' }
   const created = checkRevisionProposal('create revision', revisionInput,
-    createQuotationRevisionInEnvelope(revisionInput, createOptions, createAt), createOptions, createAt)
+    createQuotationRevisionInEnvelope(encodeQuotationEnvelope(revisionInput), createOptions, createAt), createOptions, createAt)
   assert.deepEqual(revisionInput, beforeRebuild, 'create does not mutate its source')
   assert.equal(created.quotation.header.revisionNumber, 5, 'create advances the working revision')
   assert.deepEqual(created.quotation.pendingGoodsReceiptDraft, revisionInput.quotation.pendingGoodsReceiptDraft, 'create keeps pending receipt')
@@ -313,7 +314,7 @@ try {
   const restoreAt = new Date('2026-10-12T09:00:00.000Z')
   const beforeRestore = structuredClone(created)
   const restored = checkRevisionProposal('restore revision', created,
-    restoreQuotationRevisionInEnvelope(created, 'archived-original', restoreAt), { restoreRevisionId: 'archived-original' }, restoreAt)
+    restoreQuotationRevisionInEnvelope(encodeQuotationEnvelope(created), 'archived-original', restoreAt), { restoreRevisionId: 'archived-original' }, restoreAt)
   assert.deepEqual(created, beforeRestore, 'restore does not mutate its source')
   assert.equal(restored.quotation.header.revisionNumber, 6, 'restore advances instead of reusing the archived number')
   assert.equal(restored.quotation.header.projectName, 'Original scope', 'restore uses archived quotation content')
@@ -325,7 +326,7 @@ try {
   const deleteAt = new Date('2026-10-12T10:00:00.000Z')
   const beforeDelete = structuredClone(restored)
   const deletedId = restored.revisions.at(-1).id
-  const deleted = decodeQuotationEnvelope(deleteQuotationRevisionFromEnvelope(restored, deletedId, deleteAt).envelope)
+  const deleted = decodeQuotationEnvelope(deleteQuotationRevisionFromEnvelope(encodeQuotationEnvelope(restored), deletedId, deleteAt).envelope)
   const expectedAfterDelete = structuredClone(restored)
   expectedAfterDelete.revisions = expectedAfterDelete.revisions.filter(({ id }) => id !== deletedId)
   expectedAfterDelete.exportedAt = deleteAt.toISOString()
@@ -339,7 +340,7 @@ try {
 
   const nextAt = new Date('2026-10-12T11:00:00.000Z')
   const next = checkRevisionProposal('create after deletion', deleted,
-    createQuotationRevisionInEnvelope(deleted, {}, nextAt), {}, nextAt)
+    createQuotationRevisionInEnvelope(encodeQuotationEnvelope(deleted), {}, nextAt), {}, nextAt)
   assert.equal(next.quotation.header.revisionNumber, 7, 'create after deletion remains monotonic')
   assert.deepEqual(next.revisions.map(({ revisionNumber }) => revisionNumber), [1, 4, 6], 'deleted revision numbers are not reused')
   summaryDisplayCases += 1
@@ -349,7 +350,7 @@ try {
     ['duplicate archive number', (value) => { value.revisions.push({ ...structuredClone(value.revisions[0]), id: 'duplicate-number' }) }],
     ['wrong quotation family', (value) => { value.revisions[0].quotation.id = 'different-quotation' }],
   ]) {
-    const invalid = structuredClone(revisionInput)
+    const invalid = encodeQuotationEnvelope(revisionInput)
     change(invalid)
     assert.ok(validateQuotationEnvelope(invalid).errors.length > 0, `${name}: offline rejects invalid history`)
     assert.throws(() => parseQuotationDocumentContent(JSON.stringify(invalid)), /invalid_revisions/, `${name}: app rejects invalid history`)
@@ -365,37 +366,36 @@ try {
     bytes.writeUInt32BE(32, 20)
     return `data:image/png;base64,${bytes.toString('base64')}`
   }
-  const legacyImages = structuredClone(revisionInput)
-  legacyImages.quotation.branding.logoDataUrl = imageDataUrl(64)
-  legacyImages.revisions[0].quotation.branding.logoDataUrl = imageDataUrl(32)
+  const imageInput = structuredClone(revisionInput)
+  imageInput.quotation.branding.logoDataUrl = imageDataUrl(64)
+  imageInput.revisions[0].quotation.branding.logoDataUrl = imageDataUrl(32)
   for (const number of [2, 3]) {
-    const snapshot = structuredClone(legacyImages.revisions[0])
+    const snapshot = structuredClone(imageInput.revisions[0])
     snapshot.id = `image-snapshot-${number}`
     snapshot.revisionNumber = snapshot.quotation.header.revisionNumber = number
-    snapshot.quotation.branding.logoDataUrl = number === 2 ? '' : legacyImages.quotation.branding.logoDataUrl
-    legacyImages.revisions.push(snapshot)
+    snapshot.quotation.branding.logoDataUrl = number === 2 ? '' : imageInput.quotation.branding.logoDataUrl
+    imageInput.revisions.push(snapshot)
   }
-  const legacyBefore = structuredClone(legacyImages)
-  const skillStored = buildQuotationEnvelope(legacyImages, now).envelope
+  const imageBefore = structuredClone(imageInput)
+  const skillStored = buildQuotationEnvelope(encodeQuotationEnvelope(imageInput), now).envelope
   assert.equal(skillStored.schemaVersion, 4)
   assert.deepEqual(Object.keys(skillStored.images), ['image-1', 'image-2'])
-  assert.deepEqual(decodeQuotationEnvelope(skillStored).revisions, legacyBefore.revisions, 'v3 snapshots survive image migration exactly')
+  assert.deepEqual(decodeQuotationEnvelope(skillStored).revisions, imageBefore.revisions, 'snapshots survive image encoding exactly')
   const appExpanded = parseQuotationDocumentContent(JSON.stringify(skillStored))
-  assert.deepEqual(appExpanded.revisions, legacyBefore.revisions, 'app expands skill images without altering saved snapshots')
+  assert.deepEqual(appExpanded.revisions, imageBefore.revisions, 'app expands skill images without altering saved snapshots')
   const appStored = JSON.parse(createQuotationFileContent(appExpanded.quotation, appExpanded.revisions))
   assert.equal(appStored.schemaVersion, 4)
   assert.deepEqual(appStored.images, skillStored.images, 'app/skill exact shared-image table')
-  assert.deepEqual(decodeQuotationEnvelope(appStored).revisions, legacyBefore.revisions, 'skill expands app images without altering saved snapshots')
-  assert.deepEqual(encodeQuotationEnvelope(appStored), appStored, 'codec round trip is deterministic')
-  assert.deepEqual(summarizeQuotationEnvelope(skillStored), summarizeQuotationEnvelope(legacyImages), 'images do not change totals or summary settings')
-  assert.deepEqual(legacyImages, legacyBefore, 'cross-codec migration leaves source unchanged')
-  for (const version of [1, 2]) {
-    const legacy = { ...structuredClone(legacyImages), schemaVersion: version }
-    delete legacy.revisions
-    const upgraded = buildQuotationEnvelope(legacy, now).envelope
-    assert.deepEqual(upgraded.revisions, [], `v${version} does not invent history`)
-    assert.equal(parseQuotationDocumentContent(JSON.stringify(upgraded)).quotation.branding.logoDataUrl,
-      legacy.quotation.branding.logoDataUrl, `v${version} image bytes preserved`)
+  assert.deepEqual(decodeQuotationEnvelope(appStored).revisions, imageBefore.revisions, 'skill expands app images without altering saved snapshots')
+  assert.deepEqual(encodeQuotationEnvelope(decodeQuotationEnvelope(appStored)), appStored, 'codec round trip is deterministic')
+  assert.deepEqual(summarizeQuotationEnvelope(skillStored), summarizeQuotationEnvelope(encodeQuotationEnvelope(imageInput)), 'images do not change totals or summary settings')
+  assert.deepEqual(imageInput, imageBefore, 'cross-codec round trip leaves source unchanged')
+  for (const schemaVersion of [1, 2, 3, 5]) {
+    const unsupported = { ...structuredClone(skillStored), schemaVersion }
+    const before = structuredClone(unsupported)
+    assert.ok(validateQuotationEnvelope(unsupported).errors.some(error => error.includes('schemaVersion')))
+    assert.throws(() => buildQuotationEnvelope(unsupported, now), /schemaVersion/)
+    assert.deepEqual(unsupported, before, 'rejecting unsupported schemas leaves source unchanged')
   }
   for (const mutate of [
     value => { value.quotation.branding.logoImageId = 'image-99' },
@@ -410,7 +410,7 @@ try {
   }
 
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
-  console.log(JSON.stringify({ ok: true, quotationCases: checked, revisionCases, summaryDisplayCases, sharedImageParity: true, legacyImageMigrationParity: true, receiptLineParity: true, revisionHistoryParity: true, summaryDisplayParity: true, duplicateCurrencyRejected: true, repositoryCommit: commit }))
+  console.log(JSON.stringify({ ok: true, quotationCases: checked, revisionCases, summaryDisplayCases, sharedImageParity: true, unsupportedSchemasRejected: true, receiptLineParity: true, revisionHistoryParity: true, summaryDisplayParity: true, duplicateCurrencyRejected: true, repositoryCommit: commit }))
 } finally {
   await server.close()
 }

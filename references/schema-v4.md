@@ -15,19 +15,19 @@ This is the maintained skill reference for the current app contract. The applica
 }
 ```
 
-`exportedAt` must be a canonical UTC ISO timestamp. The current app imports versions 1–4. Generate version 4 with explicit `revisions` and `images`. Versions 1 and 2 have no saved history; never fabricate it from a printed revision number. Version 3 history is retained in full. The offline validator accepts complete v2–v4 files; the builder also upgrades v1 input.
+`exportedAt` must be a canonical UTC ISO timestamp. Persisted files must be version 4 with explicit `revisions` and `images`. The bundled helpers reject versions 1–3 rather than converting them. Unversioned partial quotations are accepted only as new builder input; a printed revision number does not establish earlier history.
 
 `quotation` is the editable working draft. Each entry in `revisions` contains `{ id, revisionNumber, createdAt, note?, quotation }`, where its `quotation` is a complete, unchanged saved snapshot. Read [revisions.md](revisions.md) for lifecycle commands. History is outside the working quotation and never nests inside a snapshot.
 
-## Shared images and legacy upgrade
+## Shared images and runtime data
 
-`images` maps IDs such as `image-1`, `image-2` to original image data URL strings. Each working or archived `branding` contains `logoImageId` in place of `logoDataUrl`. References must name an own property of the table; missing references, invalid IDs, and inline `logoDataUrl` in a v4 file are rejected. `null` expands to the legacy empty logo string.
+`images` maps IDs such as `image-1`, `image-2` to original image data URL strings. Each working or archived `branding` contains `logoImageId` in place of `logoDataUrl`. References must name an own property of the table; missing references, invalid IDs, and inline `logoDataUrl` in a v4 file are rejected. `null` expands to an empty logo string in runtime data.
 
 The builder and all revision/receipt mutations emit v4. They collect the working logo first, then saved revisions in array order, deduplicate exact strings, and assign sequential IDs on each save. IDs are file-local, may change after an edit or deletion, and are not persistent image identities. Images are never resized, recompressed, or re-encoded. Deleting a revision removes only images no longer referenced anywhere. Validation also checks unused image-table values.
 
-For a new partial builder input, supply `branding.logoDataUrl` as before. For an existing v4 file, retain the entire table and references while editing other fields. To replace a logo programmatically, use the bundled `decodeQuotationEnvelope` to obtain a detached expanded envelope, edit its `branding.logoDataUrl`, and pass the whole envelope to the builder. Do not relabel a v4 file as v3 or manually remove its table.
+For a new unversioned partial builder input, supply `branding.logoDataUrl`. For an existing v4 file, retain the entire table and references while editing other fields, then rebuild the complete envelope. To replace a logo programmatically, decode the whole file, edit the working `quotation.branding.logoDataUrl`, and encode it to v4 before passing it to the builder. Preserve saved snapshots and their original logo strings.
 
-The module `scripts/quotation-json.mjs` re-exports `decodeQuotationEnvelope` and `encodeQuotationEnvelope` from the standalone, dependency-free `quotation-images.mjs` codec. Decode accepts legacy envelopes unchanged and expands v4 into a schema-3-shaped envelope; encode emits v4 and prunes unused assets. These format helpers do not replace the business validator. Public build/revision/receipt helpers return persisted v4 envelopes. Compare decoded snapshots when verifying legacy history, because branding representation and table IDs change on save while image strings and revision content remain exact.
+The module `scripts/quotation-json.mjs` re-exports `decodeQuotationEnvelope` and `encodeQuotationEnvelope` from the standalone, dependency-free `quotation-images.mjs` codec. Decode accepts a v4 envelope and returns detached runtime data with inline `logoDataUrl`, no `schemaVersion`, and no `images` table. Encode accepts that expanded envelope and emits v4, pruning unused assets. Runtime data is not a persisted schema or a legacy conversion format. These codecs do not replace business validation. Public build/revision/receipt helpers return persisted v4 envelopes. Compare decoded snapshots when verifying preservation: table IDs may change on save, but original image strings and revision content must remain exact.
 
 ## Quotation draft
 
@@ -111,7 +111,7 @@ The example source IDs must be replaced with IDs present in the quotation. Do no
 - Do not store `amount`, an expression, or a copied calculated sum in a row. Do not turn informational totals into `extraCharges`. Informational rows may overlap and must not be added together to calculate the grand total.
 - Empty or deleted active selections are saveable incomplete configuration: the offline validator warns, and the summary reports `amount: null`. A visible invalid row must be fixed or hidden before customer PDF/print export. Hidden or inactive sources are retained. Saved revisions retain their own display settings and source IDs.
 
-When any summary setting is present, `summarize` adds `summaryDisplay` with a trimmed custom `subtotalLabel` (or `null` for the default), the master visibility, and resolved `informationalTotals`, including visibility and missing-reference information. It includes raw `informationalTotalsNote` only when supplied, including explicit blank text; an absent note remains omitted because the app chooses the localized default. Normal pricing totals remain unchanged. These optional fields also existed in schema 3; round-trip checks establish support beyond a reported schema number. See [software-pdf.md](software-pdf.md).
+When any summary setting is present, `summarize` adds `summaryDisplay` with a trimmed custom `subtotalLabel` (or `null` for the default), the master visibility, and resolved `informationalTotals`, including visibility and missing-reference information. It includes raw `informationalTotalsNote` only when supplied, including explicit blank text; an absent note remains omitted because the app chooses the localized default. Normal pricing totals remain unchanged. Round-trip checks establish support beyond reported schema/API numbers; see [software-pdf.md](software-pdf.md).
 
 ## Root rows and hierarchy
 
@@ -192,7 +192,7 @@ For example, cost `0.005`, markup `100%`, and quantity `7` gives a unit selling 
 
 Tax rates are percentages from 0 to 100. `taxMode` is `single` or `mixed`. Use mixed mode when effective leaf tax classes differ.
 
-The builder migrates a valid legacy `totalsConfig.taxRate` into a tax class when no classes are supplied; it does not replace an explicit rate with zero. Explicit tax classes take precedence. Markup rates must be between 0 and 1000 percent.
+Use explicit `taxClasses`; the obsolete `totalsConfig.taxRate` field is rejected, including in partial inputs. Markup rates must be between 0 and 1000 percent.
 
 Tax is rounded per quotation tax bucket, after hierarchy rollups. Group bucket subtotals are reconciled to the canonical group selling amount. Do not calculate quotation tax by adding independently rounded leaf taxes.
 

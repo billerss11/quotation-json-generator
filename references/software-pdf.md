@@ -10,7 +10,7 @@ The helper stores per-user configuration outside the skill folder so skill updat
 %APPDATA%\quotation-json-generator\config.json
 ```
 
-Check configuration at the start of a skill invocation:
+Check configuration when application validation or PDF output is relevant:
 
 ```powershell
 node <skill-folder>\scripts\quotation-software.mjs status
@@ -18,9 +18,9 @@ node <skill-folder>\scripts\quotation-software.mjs status
 
 `status` resolves the current manifest and confirms that its selected executable exists; `usable: true` is not a schema-compatibility claim. Before validation or rendering, the helper probes `--automation api-info` with a bounded timeout and temporary result file, then checks the input schema against the reported `quotationSchemaVersion`. Batch jobs are all checked before any job runs. One operation pins the resolved executable for both probe and execution, even if the manifest changes. A schema-2/3 executable cannot process schema-4 image references; do not remove history or relabel the file to get past that check.
 
-Use `node <skill-folder>\scripts\quotation-software.mjs api-info` to inspect the configured build. Newly generated files require reported schema support of 4 or later; legacy v2/v3 files may still be read by compatible older builds. API 2.2 adds renderer revision deletion. A source checkout update does not automatically rebuild the portable executable. If the selected build is old, keep the valid JSON and report PDF/application validation as pending until a current build is available.
+Use `node <skill-folder>\scripts\quotation-software.mjs api-info` to inspect the configured build. All supported quotation files are v4 and require reported schema support of 4 or later. API 2.2 adds renderer revision deletion. A source checkout update does not automatically rebuild the portable executable. If the selected build is old, keep the valid JSON and report PDF/application validation as pending until a current build is available.
 
-Custom subtotal wording, editable breakdown notes, and informational section/item totals were added without changing schema 3 or API 2.2.0. For files using any of these settings, the helper also performs a temporary, no-network `validate --output-json` round trip and checks that the working quotation and saved revisions retain their summary settings. Requested validation/render/batch jobs start only after these checks succeed. The temporary files are cleaned up; the source JSON is unchanged. Duplicate selected IDs may be normalized, but labels, raw note text (including blanks and line breaks), visibility, source choices, and retained selections must survive. The probe retains schema-v4 shared images, expands normalized output for comparison, and never counts repeated decoded logos toward the stored size limit. A quotation number is needed for the application's output-JSON validation step.
+Reported schema/API versions alone do not establish support for custom subtotal wording, editable breakdown notes, or informational section/item totals. For files using any of these settings, the helper also performs a temporary, no-network `validate --output-json` round trip and checks that the working quotation and saved revisions retain their summary settings. Requested validation/render/batch jobs start only after these checks succeed. The temporary files are cleaned up; the source JSON is unchanged. Duplicate selected IDs may be normalized, but labels, raw note text (including blanks and line breaks), visibility, source choices, and retained selections must survive. The probe retains schema-v4 shared images, expands normalized output for comparison, and never counts repeated decoded logos toward the stored size limit. A quotation number is needed for the application's output-JSON validation step.
 
 An older executable that drops the settings is incompatible even if its schema/API numbers match. Keep the independently validated JSON and report app validation/PDF export as pending; rebuilding the portable application is separate work. Do not remove the new settings to make an old build accept the file. In an already open editor, verify the serialized settings and preview before delivering these features.
 
@@ -74,7 +74,7 @@ The application reports stable issue codes and field paths. Fix its errors befor
 
 ## Render sequence
 
-Build and validate schema-v4 JSON before rendering. This ordering preserves the JSON artifact even if the application is absent, moved, incompatible, or fails. Existing legacy-v2/v3 files may still be validated/rendered unchanged by a compatible older app.
+Build and validate schema-v4 JSON before rendering. This ordering preserves the JSON artifact even if the application is absent, moved, incompatible, or fails. The helper rejects older quotation file versions instead of converting or rendering them.
 
 Export either or both documents:
 
@@ -125,4 +125,4 @@ Manifest schema and limits follow the configured application's `api-info`: schem
 - If the application returns a nonzero automation exit code, keep the JSON and report its structured errors. Never claim that a PDF exists without checking the output file.
 - The helper preserves the application's stable exit codes (`2` through `7`) so callers can distinguish usage, input, network, filesystem, rendering, and internal failures.
 - Do not substitute browser printing, HTML-to-PDF tools, screenshots, office converters, or a separately recreated PDF template. PDF output must come from the configured Quotation Software application.
-- Headless export does not modify the input JSON. To record a successfully exported goods receipt in JSON history, explicitly run `add-goods-receipt` with the real PDF path.
+- Headless export leaves the input JSON unchanged. After a goods-receipt PDF export, `--output-json` contains the completed receipt in `goodsReceiptHistory` and clears the working pending draft. Use that returned JSON; do not append the receipt again. Use `add-goods-receipt` only when recording an export in a separate file that does not already contain it.

@@ -1,5 +1,4 @@
 {
-  "schemaVersion": 3,
   "app": "quotation-software",
   "exportedAt": "2026-10-12T08:20:00.000Z",
   "quotation": {
@@ -98,7 +97,7 @@
       "EUR": 1.08
     },
     "branding": {
-      "logoDataUrl": "",
+      "logoImageId": null,
       "accentColor": "#047857"
     },
     "metadata": {
@@ -292,7 +291,7 @@
           "EUR": 1.08
         },
         "branding": {
-          "logoDataUrl": "",
+          "logoImageId": null,
           "accentColor": "#047857"
         },
         "metadata": {
@@ -486,7 +485,7 @@
           "EUR": 1.08
         },
         "branding": {
-          "logoDataUrl": "",
+          "logoImageId": null,
           "accentColor": "#047857"
         },
         "metadata": {
@@ -579,5 +578,7 @@
         }
       }
     }
-  ]
+  ],
+  "schemaVersion": 4,
+  "images": {}
 }

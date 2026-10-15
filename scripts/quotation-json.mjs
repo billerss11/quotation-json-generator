@@ -29,14 +29,11 @@ export const automationLimits = {
   logoDimensionPixels: 4096,
   goodsReceiptDraftBytes: 5 * mebibyte,
 }
-const allowedEnvelopeFields = new Set(['schemaVersion', 'app', 'exportedAt', 'quotation'])
-const allowedV3EnvelopeFields = new Set([...allowedEnvelopeFields, 'revisions'])
-const allowedV4EnvelopeFields = new Set([...allowedV3EnvelopeFields, 'images'])
+const allowedEnvelopeFields = new Set(['schemaVersion', 'app', 'exportedAt', 'quotation', 'revisions', 'images'])
 const allowedRevisionFields = new Set(['id', 'revisionNumber', 'createdAt', 'note', 'quotation'])
 const allowedQuotationFields = new Set([
   'id', 'templateId', 'companyProfileId', 'companyProfileSnapshot', 'header', 'majorItems',
-  // Accepted only so older app exports can still be validated and updated.
-  'lineItemEntryMode', 'outputSettings', 'totalsConfig', 'exchangeRates', 'branding', 'metadata',
+  'outputSettings', 'totalsConfig', 'exchangeRates', 'branding', 'metadata',
   'pendingGoodsReceiptDraft', 'goodsReceiptHistory',
 ])
 const allowedCompanyProfileFields = new Set(['companyName', 'email', 'phone'])
@@ -53,7 +50,7 @@ const allowedItemFields = new Set([
 const allowedSectionHeaderFields = new Set(['id', 'kind', 'title'])
 const allowedTotalsFields = new Set([
   'globalMarkupRate', 'extraCharges', 'taxMode', 'taxClasses', 'defaultTaxClassId',
-  'mixedTaxColumns', 'taxRate',
+  'mixedTaxColumns',
 ])
 const allowedTaxClassFields = new Set(['id', 'label', 'rate'])
 const allowedExtraChargeFields = new Set(['id', 'label', 'amount'])
@@ -79,42 +76,41 @@ const supportedCurrencies = new Set(
 
 export function buildQuotationEnvelope(input, now = new Date()) {
   if (!isRecord(input)) throw new Error('Input must be a JSON object.')
-  if (input.schemaVersion !== undefined && ![1, 2, 3, 4].includes(input.schemaVersion)) {
-    throw new Error('Unsupported schemaVersion; expected 1, 2, 3, or 4.')
+  const isEnvelope = Object.hasOwn(input, 'schemaVersion')
+  if (isEnvelope && input.schemaVersion !== 4) {
+    throw new Error('Unsupported schemaVersion; only version 4 is supported.')
   }
-  if (input.revisions !== undefined && ![3, 4].includes(input.schemaVersion)) {
-    throw new Error('Revision history requires a complete schemaVersion 3 or 4 envelope.')
+  if (!isEnvelope && ['quotation', 'revisions', 'images', 'app', 'exportedAt'].some(key => Object.hasOwn(input, key))) {
+    throw new Error('Existing quotations require a complete schemaVersion 4 envelope; new inputs must be partial quotation objects.')
   }
-  if (input.schemaVersion === 4) {
+  let source = input
+  let revisions = []
+  if (isEnvelope) {
     const errors = []
     validateEnvelopeFields(input, errors)
     validateSharedImages(input.images, errors)
     if (errors.length) throw new Error(`Cannot build quotation:\n- ${errors.join('\n- ')}`)
-    input = decodeQuotationEnvelope(input)
-  }
-  // Working rows may be partial, but the family identity and saved history must be valid.
-  if (input.schemaVersion === 3) {
-    const errors = []
-    validateEnvelopeFields(input, errors, false)
-    if (!isRecord(input.quotation)) {
-      errors.push('quotation must be an object.')
-    } else {
-      validateAllowedFields(input.quotation, allowedQuotationFields, 'quotation', errors)
-      if (!nonEmpty(input.quotation.id)) errors.push('quotation.id must be non-empty.')
-      if (!isPositiveSafeInteger(input.quotation.header?.revisionNumber)) {
-        errors.push('header.revisionNumber must be a positive safe integer.')
-      }
+    const expanded = decodeQuotationEnvelope(input)
+    source = expanded.quotation
+    revisions = expanded.revisions
+    // Working rows may be partial; saved history and family identity must remain valid.
+    if (!nonEmpty(source.id)) errors.push('quotation.id must be non-empty.')
+    if (!isPositiveSafeInteger(source.header?.revisionNumber)) {
+      errors.push('header.revisionNumber must be a positive safe integer.')
     }
-    validateRevisions(input, errors, [])
+    validateRevisions(expanded, errors, [])
     if (errors.length) throw new Error(`Cannot build quotation:\n- ${errors.join('\n- ')}`)
   }
 
   const warnings = []
-  const source = isRecord(input.quotation) ? input.quotation : input
+  const inputErrors = []
+  validateAllowedFields(source, allowedQuotationFields, 'quotation', inputErrors)
+  if (isRecord(source.header)) validateAllowedFields(source.header, allowedHeaderFields, 'header', inputErrors)
+  if (isRecord(source.totalsConfig)) validateAllowedFields(source.totalsConfig, allowedTotalsFields, 'totalsConfig', inputErrors)
+  if (inputErrors.length) throw new Error(`Cannot build quotation:\n- ${inputErrors.join('\n- ')}`)
   if (isRecord(source.branding) && Object.hasOwn(source.branding, 'logoImageId')) {
     throw new Error('branding.logoImageId requires a complete schemaVersion 4 envelope; do not mix inline logos and references.')
   }
-  if (source !== input && 'revisions' in source) throw new Error('quotation cannot contain nested revisions.')
   const headerSource = isRecord(source.header) ? source.header : {}
   if (headerSource.revisionNumber !== undefined && !isPositiveSafeInteger(headerSource.revisionNumber)) {
     throw new Error('header.revisionNumber must be a positive safe integer.')
@@ -135,7 +131,7 @@ export function buildQuotationEnvelope(input, now = new Date()) {
   )
 
   const totalsSource = isRecord(source.totalsConfig) ? source.totalsConfig : {}
-  const taxClasses = buildTaxClasses(totalsSource.taxClasses, warnings, totalsSource.taxRate)
+  const taxClasses = buildTaxClasses(totalsSource.taxClasses, warnings)
   const taxClassIds = new Set(taxClasses.map((taxClass) => taxClass.id))
   const requestedDefaultTaxClassId = text(totalsSource.defaultTaxClassId).trim()
   const defaultTaxClassId = taxClassIds.has(requestedDefaultTaxClassId)
@@ -201,8 +197,7 @@ export function buildQuotationEnvelope(input, now = new Date()) {
   }
 
   const envelope = {
-    schemaVersion: 3, app: 'quotation-software', exportedAt: timestamp, quotation,
-    revisions: input.schemaVersion === 3 ? structuredClone(input.revisions) : [],
+    app: 'quotation-software', exportedAt: timestamp, quotation, revisions,
   }
   const persisted = encodeQuotationEnvelope(envelope)
   const result = validateQuotationEnvelope(persisted)
@@ -215,24 +210,23 @@ export function validateQuotationEnvelope(value) {
   const warnings = []
   if (!isRecord(value)) return { errors: ['Root value must be an object.'], warnings }
   validateEnvelopeFields(value, errors)
-  if (value.schemaVersion === 4) {
-    validateSharedImages(value.images, errors)
-    try { value = decodeQuotationEnvelope(value) }
-    catch (error) { return { errors: [...errors, error.message], warnings } }
-  }
+  if (value.schemaVersion !== 4) return { errors, warnings }
+  validateSharedImages(value.images, errors)
+  try { value = decodeQuotationEnvelope(value) }
+  catch (error) { return { errors: [...errors, error.message], warnings } }
   const active = validateQuotation(value.quotation)
   errors.push(...active.errors)
   warnings.push(...active.warnings)
-  if (value.schemaVersion === 3) validateRevisions(value, errors, warnings)
+  validateRevisions(value, errors, warnings)
   return { errors, warnings: [...new Set(warnings)] }
 }
 
-function validateEnvelopeFields(value, errors, enforceSizeLimit = true) {
-  validateAllowedFields(value, value.schemaVersion === 4 ? allowedV4EnvelopeFields : value.schemaVersion === 3 ? allowedV3EnvelopeFields : allowedEnvelopeFields, 'root', errors)
-  if (enforceSizeLimit && getUtf8ByteLength(JSON.stringify(value)) > automationLimits.quotationJsonBytes) {
+function validateEnvelopeFields(value, errors) {
+  validateAllowedFields(value, allowedEnvelopeFields, 'root', errors)
+  if (getUtf8ByteLength(JSON.stringify(value)) > automationLimits.quotationJsonBytes) {
     errors.push(`Quotation JSON exceeds the ${automationLimits.quotationJsonBytes} byte limit.`)
   }
-  if (![2, 3, 4].includes(value.schemaVersion)) errors.push('schemaVersion must be 2, 3, or 4.')
+  if (value.schemaVersion !== 4) errors.push('Unsupported schemaVersion; only version 4 is supported.')
   if (value.app !== 'quotation-software') errors.push('app must be quotation-software.')
   if (!canonicalIso(value.exportedAt)) errors.push('exportedAt must be a canonical UTC ISO timestamp.')
 }
@@ -257,9 +251,6 @@ function validateQuotation(quotation) {
   }
   validateCompanyProfile(quotation.companyProfileSnapshot, errors)
   validateHeader(quotation.header, errors)
-  if (quotation.lineItemEntryMode !== undefined && !['detailed', 'quick'].includes(quotation.lineItemEntryMode)) {
-    errors.push('Legacy lineItemEntryMode must be detailed or quick when present.')
-  }
   validateOutputSettings(quotation.outputSettings, quotation.majorItems, errors, warnings)
 
   const taxClassIds = validateTotals(quotation.totalsConfig, errors)
@@ -427,7 +418,7 @@ function isReferenceIdArray(value) {
 
 function validateRevisions(value, errors, warnings) {
   if (!Array.isArray(value.revisions)) {
-    errors.push('revisions must be an array for schemaVersion 3.')
+    errors.push('revisions must be an array.')
     return
   }
   const ids = new Set()
@@ -468,12 +459,6 @@ function assertValidEnvelope(value, action) {
   return result.warnings
 }
 
-function upgradeEnvelope(envelope) {
-  envelope.schemaVersion = 3
-  envelope.revisions ??= []
-  return envelope
-}
-
 export function listQuotationRevisions(value) {
   assertValidEnvelope(value, 'list revisions from an invalid quotation')
   return (value.revisions ?? []).map(({ id, revisionNumber, createdAt, note }) => ({
@@ -496,7 +481,7 @@ export function restoreQuotationRevisionInEnvelope(value, revisionId, now = new 
 
 function advanceQuotationRevision(value, options, now) {
   const warnings = assertValidEnvelope(value, 'change revisions on an invalid quotation')
-  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
+  const envelope = decodeQuotationEnvelope(value)
   const current = envelope.quotation
   const currentNumber = current.header.revisionNumber
   if (currentNumber === Number.MAX_SAFE_INTEGER) throw new Error('Cannot create the next revision: revision number overflow.')
@@ -525,7 +510,7 @@ function advanceQuotationRevision(value, options, now) {
 export function deleteQuotationRevisionFromEnvelope(value, revisionId, now = new Date()) {
   const warnings = assertValidEnvelope(value, 'delete revisions from an invalid quotation')
   if (!nonEmpty(revisionId)) throw new Error('A non-empty revision ID is required.')
-  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
+  const envelope = decodeQuotationEnvelope(value)
   const index = envelope.revisions.findIndex((revision) => revision.id === revisionId)
   if (index < 0) throw new Error(`Revision not found: ${revisionId}`)
   envelope.revisions.splice(index, 1)
@@ -562,7 +547,7 @@ export function setPendingGoodsReceiptDraftInEnvelope(value, input, now = new Da
   if (existing.errors.length > 0) {
     throw new Error(`Cannot set goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
-  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
+  const envelope = decodeQuotationEnvelope(value)
 
   const warnings = [...existing.warnings]
   const timestamp = now.toISOString()
@@ -593,7 +578,7 @@ export function addGoodsReceiptToEnvelope(value, input, now = new Date()) {
   if (existing.errors.length > 0) {
     throw new Error(`Cannot add goods receipt to an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
-  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
+  const envelope = decodeQuotationEnvelope(value)
 
   const warnings = [...existing.warnings]
   const timestamp = now.toISOString()
@@ -639,7 +624,7 @@ export function clearPendingGoodsReceiptDraftInEnvelope(value, now = new Date())
   if (existing.errors.length > 0) {
     throw new Error(`Cannot clear goods-receipt draft on an invalid quotation:\n- ${existing.errors.join('\n- ')}`)
   }
-  const envelope = upgradeEnvelope(decodeQuotationEnvelope(value))
+  const envelope = decodeQuotationEnvelope(value)
 
   delete envelope.quotation.pendingGoodsReceiptDraft
   const timestamp = now.toISOString()
@@ -1112,6 +1097,9 @@ function createGoodsReceiptNumber(documentDate) {
 function buildRootRow(raw, index, baseCurrency, ids, warnings) {
   if (!isRecord(raw)) throw new Error(`majorItems[${index}] must be an object.`)
   if (raw.kind === 'section_header') {
+    const errors = []
+    validateAllowedFields(raw, allowedSectionHeaderFields, `majorItems[${index}]`, errors)
+    if (errors.length) throw new Error(errors.join('\n'))
     return { id: uniqueId(raw.id, ids), kind: 'section_header', title: text(raw.title) }
   }
   return buildItem(raw, `majorItems[${index}]`, baseCurrency, ids, warnings)
@@ -1120,13 +1108,14 @@ function buildRootRow(raw, index, baseCurrency, ids, warnings) {
 function buildItem(raw, path, baseCurrency, ids, warnings) {
   if (!isRecord(raw)) throw new Error(`${path} must be an object.`)
   if (raw.kind === 'section_header') throw new Error(`${path}: section headers are allowed only at the root.`)
-  const rawChildren = Array.isArray(raw.children)
-    ? raw.children
-    : Array.isArray(raw.subItems) ? raw.subItems : []
+  const errors = []
+  validateAllowedFields(raw, allowedItemFields, path, errors)
+  if (errors.length) throw new Error(errors.join('\n'))
+  const rawChildren = Array.isArray(raw.children) ? raw.children : []
   const children = rawChildren.map((child, index) =>
     buildItem(child, `${path}.children[${index}]`, baseCurrency, ids, warnings),
   )
-  const name = text(raw.name || raw.title)
+  const name = text(raw.name)
   const pricingMethod = raw.pricingMethod === 'manual_price' || raw.pricingMethod === 'cost_plus'
     ? raw.pricingMethod
     : finiteNumber(raw.manualUnitPrice) ? 'manual_price' : 'cost_plus'
@@ -1221,15 +1210,8 @@ function validateItem(item, path, depth, ids, currencies, taxIds, errors, warnin
   )
 }
 
-function buildTaxClasses(raw, warnings, legacyRate) {
-  if (legacyRate !== undefined && (!finiteNonNegative(legacyRate) || legacyRate > maxTaxRate)) {
-    throw new Error(`totalsConfig.taxRate must be between 0 and ${maxTaxRate}.`)
-  }
+function buildTaxClasses(raw, warnings) {
   if (!Array.isArray(raw) || raw.length === 0) {
-    if (legacyRate !== undefined) {
-      warnings.push(`Legacy taxRate ${legacyRate}% was migrated to a tax class.`)
-      return [{ id: 'default-tax-class', label: `${legacyRate}%`, rate: legacyRate }]
-    }
     warnings.push('Tax configuration was missing; used one 0% tax class.')
     return [{ id: 'default-tax-class', label: '0%', rate: 0 }]
   }
@@ -1277,10 +1259,6 @@ function validateTotals(value, errors) {
     errors.push('mixedTaxColumns contains an invalid column.')
   } else if (new Set(value.mixedTaxColumns).size !== value.mixedTaxColumns.length) {
     errors.push('mixedTaxColumns must not contain duplicates.')
-  }
-  if (value.taxRate !== undefined
-    && (!finiteNonNegative(value.taxRate) || value.taxRate > maxTaxRate)) {
-    errors.push(`taxRate must be between 0 and ${maxTaxRate}.`)
   }
   return ids
 }
@@ -1838,8 +1816,9 @@ function normalizeCurrency(value) {
 }
 
 function normalizeQuotationTemplateId(value) {
-  if (value === 'legacy') return 'classic'
-  return templates.has(value) ? value : 'classic'
+  if (value === undefined) return 'classic'
+  if (!templates.has(value)) throw new Error('quotation.templateId is unsupported.')
+  return value
 }
 
 function isPositiveSafeInteger(value) { return Number.isSafeInteger(value) && value > 0 }
@@ -1961,7 +1940,7 @@ async function readJsonFile(filePath) {
 }
 
 async function writeQuotationFile(filePath, envelope) {
-  const content = `${JSON.stringify(encodeQuotationEnvelope(envelope), null, 2)}\n`
+  const content = `${JSON.stringify(envelope, null, 2)}\n`
   const result = validateQuotationJsonContent(content)
   if (result.errors.length) throw new Error(`Cannot write quotation:\n- ${result.errors.join('\n- ')}`)
   await writeFile(resolve(filePath), content, 'utf8')
@@ -2011,27 +1990,8 @@ async function runSelfTest(outputPath) {
   }, new Date('2026-08-19T08:00:00.000Z'))
   const result = validateQuotationEnvelope(envelope)
   if (result.errors.length > 0) throw new Error(result.errors.join('\n'))
-  if ('lineItemEntryMode' in envelope.quotation) {
-    throw new Error('Removed line-item entry mode was generated.')
-  }
-  const legacyEntryMode = structuredClone(envelope)
-  legacyEntryMode.quotation.lineItemEntryMode = 'quick'
-  if (validateQuotationEnvelope(legacyEntryMode).errors.length > 0) {
-    throw new Error('Legacy line-item entry mode compatibility failed.')
-  }
-  legacyEntryMode.quotation.lineItemEntryMode = 'fast'
-  if (!validateQuotationEnvelope(legacyEntryMode).errors.some((error) => error.includes('Legacy lineItemEntryMode'))) {
-    throw new Error('Invalid legacy line-item entry mode validation failed.')
-  }
   if (envelope.quotation.templateId !== 'classic') {
     throw new Error('Default quotation template generation failed.')
-  }
-  const migratedTemplate = buildQuotationEnvelope({
-    templateId: 'legacy',
-    header: { currency: 'USD', documentLocale: 'en-US' },
-  }, new Date('2026-08-19T08:00:00.000Z'))
-  if (migratedTemplate.envelope.quotation.templateId !== 'classic') {
-    throw new Error('Legacy quotation template migration failed.')
   }
   const spreadsheetTemplate = buildQuotationEnvelope({
     templateId: 'spreadsheet',

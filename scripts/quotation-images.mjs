@@ -5,8 +5,7 @@ const isRecord = value => typeof value === 'object' && value !== null && !Array.
 
 export function decodeQuotationEnvelope(value) {
   if (!isRecord(value)) throw new Error('Quotation envelope must be an object.')
-  if (value.schemaVersion !== undefined && ![1, 2, 3, 4].includes(value.schemaVersion)) throw new Error('Unsupported quotation schemaVersion.')
-  if (value.schemaVersion !== 4) return structuredClone(value)
+  if (value.schemaVersion !== 4) throw new Error('Unsupported quotation schemaVersion; only version 4 is supported.')
   if (!isRecord(value.images)) throw new Error('images must be an object for schemaVersion 4.')
   for (const [id, dataUrl] of Object.entries(value.images)) {
     if (!imageIdPattern.test(id)) throw new Error(`images.${id}: invalid image ID.`)
@@ -22,7 +21,7 @@ export function decodeQuotationEnvelope(value) {
     if (id !== null && (typeof id !== 'string' || !imageIdPattern.test(id) || !Object.hasOwn(value.images, id))) {
       throw new Error(`${path}.branding.logoImageId must be null or reference an existing image.`)
     }
-    // Preserve the old property position so legacy snapshot content remains stable.
+    // Keep snapshot field order stable across image encoding and decoding.
     quotation.branding = { logoDataUrl: id === null ? '' : value.images[id], ...branding }
     delete quotation.branding.logoImageId
   }
@@ -30,13 +29,16 @@ export function decodeQuotationEnvelope(value) {
   if (Array.isArray(expanded.revisions)) expanded.revisions.forEach((revision, index) => {
     if (isRecord(revision)) expandBranding(revision.quotation, `revisions[${index}].quotation`)
   })
-  expanded.schemaVersion = 3
+  delete expanded.schemaVersion
   delete expanded.images
   return expanded
 }
 
 export function encodeQuotationEnvelope(value) {
-  const envelope = decodeQuotationEnvelope(value)
+  if (!isRecord(value) || Object.hasOwn(value, 'schemaVersion') || Object.hasOwn(value, 'images')) {
+    throw new Error('Encoding requires an unversioned expanded envelope; decode a schemaVersion 4 file first.')
+  }
+  const envelope = structuredClone(value)
   const images = {}
   const ids = new Map()
   const storeBranding = (quotation, path) => {
@@ -58,7 +60,6 @@ export function encodeQuotationEnvelope(value) {
     delete quotation.branding.logoDataUrl
   }
   storeBranding(envelope.quotation, 'quotation')
-  envelope.revisions ??= []
   if (!Array.isArray(envelope.revisions)) throw new Error('revisions must be an array.')
   envelope.revisions.forEach((revision, index) => storeBranding(revision?.quotation, `revisions[${index}].quotation`))
   envelope.schemaVersion = 4

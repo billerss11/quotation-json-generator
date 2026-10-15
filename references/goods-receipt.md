@@ -1,6 +1,6 @@
 # Goods-receipt draft and history schema
 
-The application source of truth is `src/features/goods-receipts/utils/goodsReceipt.ts`. Pending and completed receipts live inside the working `quotation` in the schema-v4 envelope. Receipt helper commands preserve all saved quotation revisions exactly and upgrade legacy-v2/v3 envelopes to v4 with shared images.
+The application source of truth is `src/features/goods-receipts/utils/goodsReceipt.ts`. Pending and completed receipts live inside the working `quotation` in the schema-v4 envelope. Receipt helper commands require v4 and preserve all decoded saved quotation revisions and original image strings exactly.
 
 ## Lifecycle
 
@@ -177,7 +177,7 @@ Line overrides may identify a quotation line by `sourceItemId`, `sourceItemNumbe
 
 The builder defaults missing document date to today, GR number to `GR-YYYYMMDD`, template to `standard`, and selection to `detailed`. It prefills customer, supplier, project, and contact values using the same quotation fields as the GUI. Disclose defaults that affect the receipt.
 
-For an already exported receipt, use `add-goods-receipt` with `{ exportedAt, filePath, draft }`. That command adds a completed history record and clears any pending draft, matching the application after successful direct PDF export.
+For an already exported receipt not yet recorded in the file, use `add-goods-receipt` with `{ exportedAt, filePath, draft }`. It adds completed history and clears the pending draft. Direct PDF export already does this in the app's state and returned `--output-json`; do not add the same receipt again.
 
 To discard only the pending draft while preserving completed history, run:
 
@@ -187,4 +187,4 @@ node <skill-folder>\scripts\quotation-json.mjs clear-goods-receipt-draft <quotat
 
 ## Validation
 
-The validator checks the complete quotation, pending goods-receipt draft, and every stored history record. It rejects unknown fields, drafts larger than 5 MB serialized UTF-8, malformed record metadata, dates, templates, line fields, hierarchy paths, negative quantities, duplicate IDs, and receipts with no selected positive-quantity lines. It warns when received quantity exceeds quoted quantity, a selected line has zero quantity, ancestor and descendant selections overlap, quotation identity differs from the current quotation, or a history record's `filePath` is empty.
+The validator checks the complete quotation, pending goods-receipt draft, and every stored history record. It rejects unknown fields, drafts larger than 5 MiB serialized UTF-8, malformed record metadata, dates, templates, line fields, hierarchy paths, negative quantities, duplicate IDs, and receipts with no selected positive-quantity lines. It warns when received quantity exceeds quoted quantity, a selected line has zero quantity, ancestor and descendant selections overlap, quotation identity differs from the current quotation, or a history record's `filePath` is empty.

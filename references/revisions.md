@@ -1,6 +1,6 @@
 # Quotation revision workflows
 
-Use the complete schema-v4 envelope throughout editing: `{ schemaVersion, app, exportedAt, quotation, revisions, images }`. A new quotation has `revisions: []` and `images: {}` when it has no logo. Schema-v3 files retain every snapshot when upgraded; only image storage changes. All mutation commands emit v4, deduplicate exact image strings across current and saved versions, and never recompress them. Existing schema-v1/v2 quotations can be upgraded without inventing earlier offers, even if their printed revision number is greater than 1.
+Use the complete schema-v4 envelope throughout editing: `{ schemaVersion, app, exportedAt, quotation, revisions, images }`. A new quotation has `revisions: []` and `images: {}` when it has no logo. All mutation commands require v4, deduplicate exact image strings across current and saved versions, and never recompress them. They reject older file versions. A printed revision number does not establish earlier offers.
 
 ## Choose the requested operation
 

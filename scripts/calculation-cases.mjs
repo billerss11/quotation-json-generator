@@ -33,14 +33,16 @@ export const calculationCases = [
     grandTotal: 100.02,
   },
   {
-    name: 'legacy tax rate migrates into a tax class',
-    input: { totalsConfig: { globalMarkupRate: 0, taxRate: 13 } },
+    name: 'single tax class applies to the subtotal',
+    input: { totalsConfig: {
+      globalMarkupRate: 0, taxClasses: [{ id: 'standard', label: '13%', rate: 13 }], defaultTaxClassId: 'standard',
+    } },
     grandTotal: 113,
   },
   {
-    name: 'explicit tax classes take precedence over the legacy rate',
+    name: 'selected default tax class supplies the rate',
     input: { totalsConfig: {
-      globalMarkupRate: 0, taxRate: 13,
+      globalMarkupRate: 0,
       taxClasses: [{ id: 'service', label: '6%', rate: 6 }], defaultTaxClassId: 'service',
     } },
     grandTotal: 106,

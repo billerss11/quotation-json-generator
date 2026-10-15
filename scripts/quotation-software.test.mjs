@@ -82,28 +82,24 @@ async function mockPortableApplication(t, directory, apiInfo, { normalizeInput, 
   return { configPath, calls }
 }
 
-function createSchemaInput(schemaVersion) {
+function createSchemaInput(schemaVersion = 4) {
   const { envelope: persisted } = buildQuotationEnvelope({
     header: { quotationNumber: 'Q-1', currency: 'USD', documentLocale: 'en-US' },
     majorItems: [{ id: 'line-1', name: 'Valve', quantity: 2, unitCost: 50, costCurrency: 'USD' }],
   }, new Date('2026-10-12T08:00:00.000Z'))
   const envelope = decodeQuotationEnvelope(persisted)
-  envelope.schemaVersion = schemaVersion === 4 ? 3 : schemaVersion
-  delete envelope.revisions
-  if (schemaVersion >= 3) {
-    const snapshot = structuredClone(envelope.quotation)
-    snapshot.header.revisionNumber = 1
-    envelope.quotation.header.revisionNumber = 2
-    envelope.revisions = [{
-      id: 'revision-1', revisionNumber: 1, createdAt: '2026-10-12T08:00:00.000Z',
-      note: 'Original offer', quotation: snapshot,
-    }]
-  }
-  return schemaVersion === 4 ? encodeQuotationEnvelope(envelope) : envelope
+  const snapshot = structuredClone(envelope.quotation)
+  snapshot.header.revisionNumber = 1
+  envelope.quotation.header.revisionNumber = 2
+  envelope.revisions = [{
+    id: 'revision-1', revisionNumber: 1, createdAt: '2026-10-12T08:00:00.000Z',
+    note: 'Original offer', quotation: snapshot,
+  }]
+  return { ...encodeQuotationEnvelope(envelope), schemaVersion }
 }
 
 const summaryApiInfo = {
-  apiVersion: '2.2.0', appVersion: '0.1.0', quotationSchemaVersion: 3,
+  apiVersion: '2.2.0', appVersion: '0.1.0', quotationSchemaVersion: 4,
   commands: ['validate', 'render', 'batch'],
 }
 
@@ -144,14 +140,14 @@ async function assertSummaryProbeFilesRemoved(calls) {
   }
 }
 
-test('blocks summary-enabled validation and rendering on an app with matching old API/schema versions', async (t) => {
+test('blocks dropped summary settings even when API 2.2 and schema 4 versions match', async (t) => {
   const directory = await createTestDirectory(t)
   const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, { normalizeInput: stripWorkingSummarySettings })
   const inputFile = join(directory, 'quotation.json')
   const outputJson = join(directory, 'normalized.json')
   const quotationPdf = join(directory, 'quotation.pdf')
   const resultJson = join(directory, 'requested-result.json')
-  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(4)))
   const before = await readFile(inputFile, 'utf8')
   const configBefore = await readFile(configPath, 'utf8')
   for (const run of [validateDocument, renderDocuments]) {
@@ -180,7 +176,7 @@ for (const [key, value] of [
     const directory = await createTestDirectory(t)
     const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo, { normalizeInput: stripWorkingSummarySettings })
     const inputFile = join(directory, 'quotation.json')
-    const input = createSchemaInput(3)
+    const input = createSchemaInput(4)
     input.quotation.outputSettings[key] = value
     await writeJson(inputFile, input)
     await assert.rejects(validateDocument({ inputFile, configPath }), error => error.report?.errors[0]?.code === 'quotation_summary_settings_unsupported')
@@ -203,7 +199,7 @@ test('accepts a supporting app, allowing ID deduplication and preserving raw lab
   const inputFile = join(directory, 'quotation.json')
   const outputJson = join(directory, 'normalized.json')
   const quotationPdf = join(directory, 'quotation.pdf')
-  const input = addSummarySettings(createSchemaInput(3))
+  const input = addSummarySettings(createSchemaInput(4))
   input.revisions[0].quotation.outputSettings = structuredClone(input.quotation.outputSettings)
   await writeJson(inputFile, input)
   const before = await readFile(inputFile, 'utf8')
@@ -233,7 +229,7 @@ test('checks archived-only summary settings through the working normalizer witho
     },
   })
   const inputFile = join(directory, 'quotation.json')
-  const input = addSummarySettings(createSchemaInput(3), { archivedOnly: true })
+  const input = addSummarySettings(createSchemaInput(4), { archivedOnly: true })
   await writeJson(inputFile, input)
   const before = await readFile(inputFile, 'utf8')
   await assert.rejects(validateDocument({ inputFile, configPath }), error => {
@@ -259,7 +255,7 @@ test('checks advanced archived item settings even when the working draft only us
     },
   })
   const inputFile = join(directory, 'quotation.json')
-  const input = addSummarySettings(createSchemaInput(3), { archivedOnly: true })
+  const input = addSummarySettings(createSchemaInput(4), { archivedOnly: true })
   input.quotation.outputSettings = {
     itemDetailLevel: 3, showInformationalTotals: false,
     informationalTotals: [{ id: 'summary-1', label: 'Section summary', sectionIds: [], visible: false }],
@@ -285,7 +281,7 @@ test('rejects dropped archive-only blank notes even when the app preserves saved
     },
   })
   const inputFile = join(directory, 'quotation.json')
-  const input = createSchemaInput(3)
+  const input = createSchemaInput(4)
   input.revisions[0].quotation.outputSettings.informationalTotalsNote = ''
   await writeJson(inputFile, input)
   const before = await readFile(inputFile, 'utf8')
@@ -306,7 +302,7 @@ test('preflights every unique summary batch input before starting any requested 
       ? stripWorkingSummarySettings(envelope) : envelope,
   })
   const manifestFile = join(directory, 'batch', 'jobs.json')
-  const inputs = [createSchemaInput(3), addSummarySettings(createSchemaInput(3)), addSummarySettings(createSchemaInput(3))]
+  const inputs = [createSchemaInput(4), addSummarySettings(createSchemaInput(4)), addSummarySettings(createSchemaInput(4))]
   inputs[2].quotation.outputSettings.subtotalLabel = 'Unsupported'
   const inputPaths = inputs.map((_, index) => join(dirname(manifestFile), `${index}.json`))
   for (const [index, input] of inputs.entries()) await writeJson(inputPaths[index], input)
@@ -332,7 +328,7 @@ test('starts a compatible summary batch after checking repeated inputs once', as
   const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo)
   const inputFile = join(directory, 'quotation.json')
   const manifestFile = join(directory, 'jobs.json')
-  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(4)))
   await writeJson(manifestFile, { schemaVersion: 1, jobs: [1, 2].map(index => ({
     id: `job-${index}`, command: 'validate', input: 'quotation.json',
   })) })
@@ -352,7 +348,7 @@ test('pins the same executable for summary probing and the requested command whe
     },
   })
   const inputFile = join(directory, 'quotation.json')
-  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(4)))
   const report = await validateDocument({ inputFile, configPath })
   assert.equal(report.softwarePath, join(directory, 'mock-portable.exe'))
   assert.equal((await getSoftwareStatus(configPath)).softwarePath, replacementPath)
@@ -374,7 +370,7 @@ for (const [name, alter] of [
       normalizeInput: envelope => { alter(envelope.quotation.outputSettings); return envelope },
     })
     const inputFile = join(directory, 'quotation.json')
-    const input = addSummarySettings(createSchemaInput(3))
+    const input = addSummarySettings(createSchemaInput(4))
     delete input.quotation.outputSettings.informationalTotals[0].source
     delete input.quotation.outputSettings.informationalTotals[0].itemIds
     input.quotation.outputSettings.informationalTotals.push({ id: 'second', label: 'Other', sectionIds: [], visible: false })
@@ -391,7 +387,7 @@ test('cleans probe files and retains authoritative validation errors when round-
     documentReport: ({ command }) => ({ ok: false, command, exitCode: 3, errors: [{ code: 'quotation_number_required', message: 'A quotation number is required.' }], warnings: [], outputs: [] }),
   })
   const inputFile = join(directory, 'quotation.json')
-  await writeJson(inputFile, addSummarySettings(createSchemaInput(3)))
+  await writeJson(inputFile, addSummarySettings(createSchemaInput(4)))
   await assert.rejects(validateDocument({ inputFile, configPath }), error => {
     assert.equal(error.report.errors[0].code, 'quotation_summary_settings_check_failed')
     assert.equal(error.report.errors[0].details.validationReport.errors[0].code, 'quotation_number_required')
@@ -401,14 +397,14 @@ test('cleans probe files and retains authoritative validation errors when round-
   await assertSummaryProbeFilesRemoved(calls)
 })
 
-test('blocks schema 3 document jobs on a schema 2 portable without changing files or history', async (t) => {
+test('blocks schema 4 document jobs on a schema 2 portable without changing files or history', async (t) => {
   const directory = await createTestDirectory(t)
   const { configPath, calls } = await mockPortableApplication(t, directory, {
     apiVersion: '2.0.0', quotationSchemaVersion: 2, commands: ['validate', 'render', 'batch'],
   })
   const inputFile = join(directory, 'quotation.json')
   const outputJson = join(directory, 'normalized.json')
-  await writeJson(inputFile, createSchemaInput(3))
+  await writeJson(inputFile, createSchemaInput(4))
   const before = await readFile(inputFile, 'utf8')
   const configBefore = await readFile(configPath, 'utf8')
   for (const run of [validateDocument, renderDocuments]) {
@@ -416,7 +412,7 @@ test('blocks schema 3 document jobs on a schema 2 portable without changing file
       assert.ok(error instanceof QuotationSoftwareExecutionError)
       assert.equal(error.exitCode, 3)
       assert.equal(error.report.errors[0].code, 'quotation_schema_unsupported')
-      assert.equal(error.report.errors[0].details.inputSchemaVersion, 3)
+      assert.equal(error.report.errors[0].details.inputSchemaVersion, 4)
       assert.equal(error.report.errors[0].details.supportedSchemaVersion, 2)
       assert.match(error.message, /configure-current/)
       assert.match(error.message, /Keep the JSON and revision history unchanged/)
@@ -435,7 +431,7 @@ test('checks all relative batch inputs before starting any job on an old portabl
     apiVersion: '2.0.0', quotationSchemaVersion: 2, commands: ['batch'],
   })
   const manifestFile = join(directory, 'batch', 'jobs.json')
-  const inputs = [2, 3, 3].map((version, index) => ({
+  const inputs = [4, 4, 4].map((version, index) => ({
     path: join(dirname(manifestFile), 'input', `${index}.json`), value: createSchemaInput(version),
   }))
   for (const input of inputs) await writeJson(input.path, input.value)
@@ -448,9 +444,9 @@ test('checks all relative batch inputs before starting any job on an old portabl
   await assert.rejects(runAutomationBatch({ manifestFile, configPath, noNetwork: true }), error => {
     assert.ok(error instanceof QuotationSoftwareExecutionError)
     assert.equal(error.exitCode, 3)
-    assert.equal(error.report.errors.length, 2)
-    assert.deepEqual(error.report.errors.map(issue => issue.fieldPath), ['jobs[1].input', 'jobs[2].input'])
-    assert.deepEqual(error.report.errors.map(issue => issue.details.jobId), ['job-1', 'job-2'])
+    assert.equal(error.report.errors.length, 3)
+    assert.deepEqual(error.report.errors.map(issue => issue.fieldPath), ['jobs[0].input', 'jobs[1].input', 'jobs[2].input'])
+    assert.deepEqual(error.report.errors.map(issue => issue.details.jobId), ['job-0', 'job-1', 'job-2'])
     assert.ok(error.report.errors.every(issue => issue.code === 'quotation_schema_unsupported'))
     return true
   })
@@ -467,34 +463,72 @@ test('checks all relative batch inputs before starting any job on an old portabl
   assert.deepEqual(calls.map(args => args[1]), ['api-info', 'api-info'])
 })
 
-test('schema 3 portable API 2.1 accepts schema 2 and 3 documents and mixed batches', async (t) => {
+test('schema 4 portable API 2.2 accepts current documents and batches', async (t) => {
   const directory = await createTestDirectory(t)
   const { configPath, calls } = await mockPortableApplication(t, directory, {
-    apiVersion: '2.1.0', quotationSchemaVersion: 3, commands: ['validate', 'render', 'batch'],
+    apiVersion: '2.2.0', quotationSchemaVersion: 4, commands: ['validate', 'render', 'batch'],
   })
-  for (const schemaVersion of [2, 3]) {
-    const inputFile = join(directory, `schema-${schemaVersion}.json`)
-    const outputJson = join(directory, `output-${schemaVersion}.json`)
-    await writeJson(inputFile, createSchemaInput(schemaVersion))
-    const before = await readFile(inputFile, 'utf8')
-    for (const run of [validateDocument, renderDocuments]) {
-      const report = await run({ inputFile, outputJson, configPath, noNetwork: true, force: true })
-      assert.equal(report.ok, true)
-      assert.equal(await readFile(inputFile, 'utf8'), before)
-      assert.equal(await readFile(outputJson, 'utf8'), before)
-    }
+  const inputFile = join(directory, 'quotation.json')
+  const outputJson = join(directory, 'output.json')
+  await writeJson(inputFile, createSchemaInput())
+  const before = await readFile(inputFile, 'utf8')
+  for (const run of [validateDocument, renderDocuments]) {
+    const report = await run({ inputFile, outputJson, configPath, noNetwork: true, force: true })
+    assert.equal(report.ok, true)
+    assert.equal(await readFile(inputFile, 'utf8'), before)
+    assert.equal(await readFile(outputJson, 'utf8'), before)
   }
   const manifestFile = join(directory, 'jobs.json')
   await writeJson(manifestFile, {
     schemaVersion: 1,
-    jobs: [2, 3].map(version => ({ command: 'validate', input: `schema-${version}.json` })),
+    jobs: ['validate', 'render'].map(command => ({ command, input: 'quotation.json' })),
   })
   assert.equal((await runAutomationBatch({ manifestFile, configPath, noNetwork: true })).ok, true)
   assert.deepEqual(calls.map(args => args[1]), [
-    'api-info', 'validate', 'api-info', 'render',
     'api-info', 'validate', 'api-info', 'render', 'api-info', 'batch',
   ])
   assert.ok(calls.filter(args => args[1] !== 'api-info').every(args => args.includes('--no-network')))
+})
+
+test('rejects old, missing and unknown input schemas before calling the app', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo)
+  const inputFile = join(directory, 'quotation.json')
+  const outputJson = join(directory, 'existing-output.json')
+  await writeFile(outputJson, 'Existing output', 'utf8')
+  for (const schemaVersion of [undefined, null, 1, 2, 3, 5, '4']) {
+    const input = createSchemaInput()
+    if (schemaVersion === undefined) delete input.schemaVersion
+    else input.schemaVersion = schemaVersion
+    await writeJson(inputFile, input)
+    const before = await readFile(inputFile, 'utf8')
+    for (const run of [validateDocument, renderDocuments]) {
+      await assert.rejects(run({ inputFile, outputJson, configPath }), /only version 4 is supported/)
+    }
+    assert.equal(await readFile(inputFile, 'utf8'), before)
+    assert.equal(await readFile(outputJson, 'utf8'), 'Existing output')
+  }
+  assert.deepEqual(calls, [])
+})
+
+test('rejects every unsupported batch input before starting requested jobs', async (t) => {
+  const directory = await createTestDirectory(t)
+  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo)
+  const manifestFile = join(directory, 'jobs.json')
+  const versions = [1, 2, 3, 5]
+  for (const version of versions) await writeJson(join(directory, `${version}.json`), createSchemaInput(version))
+  const jobs = versions.map(version => ({ id: `schema-${version}`, command: 'validate', input: `${version}.json` }))
+  await writeJson(manifestFile, { schemaVersion: 1, jobs })
+  const files = [manifestFile, ...versions.map(version => join(directory, `${version}.json`))]
+  const before = await Promise.all(files.map(file => readFile(file, 'utf8')))
+  await assert.rejects(runAutomationBatch({ manifestFile, configPath }), error => {
+    assert.equal(error.exitCode, 3)
+    assert.deepEqual(error.report.errors.map(issue => issue.fieldPath), jobs.map((_, index) => `jobs[${index}].input`))
+    assert.ok(error.report.errors.every(issue => issue.code === 'quotation_schema_unsupported'))
+    return true
+  })
+  assert.deepEqual(calls.map(args => args[1]), ['api-info'])
+  assert.deepEqual(await Promise.all(files.map(file => readFile(file, 'utf8'))), before)
 })
 
 test('refuses an app with unknown schema support before opening a quotation', async (t) => {
@@ -503,7 +537,7 @@ test('refuses an app with unknown schema support before opening a quotation', as
     apiVersion: '2.2.0', commands: ['validate'],
   })
   const inputFile = join(directory, 'quotation.json')
-  await writeJson(inputFile, createSchemaInput(2))
+  await writeJson(inputFile, createSchemaInput(4))
   await assert.rejects(validateDocument({ inputFile, configPath }), error => {
     assert.equal(error.exitCode, 3)
     assert.equal(error.report.errors[0].code, 'quotation_schema_unknown')
@@ -512,9 +546,9 @@ test('refuses an app with unknown schema support before opening a quotation', as
   assert.deepEqual(calls.map(args => args[1]), ['api-info'])
 })
 
-test('blocks schema 4 validation, render and mixed batch inputs on a schema 3 application', async (t) => {
+test('blocks schema 4 validation, render and batch inputs on a schema 3 application', async (t) => {
   const directory = await createTestDirectory(t)
-  const { configPath, calls } = await mockPortableApplication(t, directory, summaryApiInfo)
+  const { configPath, calls } = await mockPortableApplication(t, directory, { ...summaryApiInfo, quotationSchemaVersion: 3 })
   const inputFile = join(directory, 'shared-images.json')
   await writeJson(inputFile, addSummarySettings(createSchemaInput(4)))
   const before = await readFile(inputFile, 'utf8')
@@ -525,14 +559,13 @@ test('blocks schema 4 validation, render and mixed batch inputs on a schema 3 ap
       return true
     })
   }
-  await writeJson(join(directory, 'legacy.json'), createSchemaInput(3))
   const manifestFile = join(directory, 'jobs.json')
   await writeJson(manifestFile, { schemaVersion: 1, jobs: [
-    { command: 'validate', input: 'legacy.json' },
+    { command: 'validate', input: 'shared-images.json' },
     { command: 'render', input: 'shared-images.json' },
   ] })
   await assert.rejects(runAutomationBatch({ manifestFile, configPath }), error => {
-    assert.equal(error.report.errors[0].fieldPath, 'jobs[1].input')
+    assert.deepEqual(error.report.errors.map(issue => issue.fieldPath), ['jobs[0].input', 'jobs[1].input'])
     return true
   })
   assert.deepEqual(calls.map(args => args[1]), ['api-info', 'api-info', 'api-info'])
@@ -545,32 +578,27 @@ test('summary compatibility decodes v4 output and keeps shared images in its v4 
   const { configPath } = await mockPortableApplication(t, directory, { ...summaryApiInfo, quotationSchemaVersion: 4 }, {
     normalizeInput: (envelope, { args }) => {
       if (argumentValue(args, '--input').includes('summary-input')) {
-        if (envelope.schemaVersion === 4) {
-          assert.deepEqual(envelope.images, { 'image-1': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6n6sAAAAASUVORK5CYII=' })
-          assert.equal(envelope.quotation.branding.logoImageId, 'image-1')
-          probeSeen = true
-        }
+        assert.equal(envelope.schemaVersion, 4)
+        assert.deepEqual(envelope.images, { 'image-1': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6n6sAAAAASUVORK5CYII=' })
+        assert.equal(envelope.quotation.branding.logoImageId, 'image-1')
+        probeSeen = true
       }
-      return encodeQuotationEnvelope(envelope)
+      return encodeQuotationEnvelope(decodeQuotationEnvelope(envelope))
     },
   })
-  for (const version of [2, 3, 4]) {
-    const input = addSummarySettings(createSchemaInput(version))
-    if (version === 4) {
-      input.images = { 'image-1': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6n6sAAAAASUVORK5CYII=' }
-      input.quotation.branding.logoImageId = 'image-1'
-      input.revisions[0].quotation.branding.logoImageId = 'image-1'
-    }
-    const inputFile = join(directory, `input-${version}.json`)
-    const outputJson = join(directory, `output-${version}.json`)
-    await writeJson(inputFile, input)
-    const before = await readFile(inputFile, 'utf8')
-    assert.equal((await validateDocument({ inputFile, outputJson, configPath })).ok, true)
-    const output = JSON.parse(await readFile(outputJson, 'utf8'))
-    assert.equal(output.schemaVersion, 4)
-    assert.deepEqual(decodeQuotationEnvelope(output).quotation, decodeQuotationEnvelope(input).quotation)
-    assert.equal(await readFile(inputFile, 'utf8'), before)
-  }
+  const input = addSummarySettings(createSchemaInput())
+  input.images = { 'image-1': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6n6sAAAAASUVORK5CYII=' }
+  input.quotation.branding.logoImageId = 'image-1'
+  input.revisions[0].quotation.branding.logoImageId = 'image-1'
+  const inputFile = join(directory, 'input.json')
+  const outputJson = join(directory, 'output.json')
+  await writeJson(inputFile, input)
+  const before = await readFile(inputFile, 'utf8')
+  assert.equal((await validateDocument({ inputFile, outputJson, configPath })).ok, true)
+  const output = JSON.parse(await readFile(outputJson, 'utf8'))
+  assert.equal(output.schemaVersion, 4)
+  assert.deepEqual(decodeQuotationEnvelope(output), decodeQuotationEnvelope(input))
+  assert.equal(await readFile(inputFile, 'utf8'), before)
   assert.equal(probeSeen, true)
 })
 

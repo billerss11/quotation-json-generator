@@ -180,14 +180,16 @@ async function assertInputSchemaCompatibility(command, apiInfo, inputs) {
         continue
       }
       parsedInputs.push({ inputFile, jobId, fieldPath, input })
-      if (typeof input?.schemaVersion === 'number' && input.schemaVersion > supportedSchemaVersion) {
+      if (input?.schemaVersion !== 4 || supportedSchemaVersion < 4) {
         errors.push({
           code: 'quotation_schema_unsupported',
-          message: `Quotation JSON ${inputFile} uses schema ${input.schemaVersion}, but the configured application supports schema ${supportedSchemaVersion}. ${remedy}`,
+          message: input?.schemaVersion !== 4
+            ? `Quotation JSON ${inputFile} must use schema version 4; other versions are not supported.`
+            : `Quotation JSON ${inputFile} uses schema 4, but the configured application supports schema ${supportedSchemaVersion}. ${remedy}`,
           fieldPath,
           details: {
             inputFile,
-            inputSchemaVersion: input.schemaVersion,
+            inputSchemaVersion: input?.schemaVersion ?? null,
             supportedSchemaVersion,
             ...(jobId ? { jobId } : {}),
           },
@@ -309,7 +311,7 @@ function createSummarySettingsProbe(input) {
   }
   // Prefer the row-specific origin over its containing array's origin.
   fieldOrigins.sort((left, right) => right[0].length - left[0].length)
-  return { probe: input.schemaVersion === 4 ? encodeQuotationEnvelope(probe) : probe, fieldOrigins }
+  return { probe: encodeQuotationEnvelope(probe), fieldOrigins }
 }
 
 function getSummaryDocuments(envelope) {

@@ -284,9 +284,35 @@ test('summarizes unnormalized extra charges exactly as import would', () => {
   assert.deepEqual(envelope, before)
 })
 
-test('does not replace an invalid supplied legacy tax rate with zero', () => {
-  for (const taxRate of [-1, 101, '13%']) {
+test('rejects obsolete supplied fields instead of migrating them', () => {
+  for (const taxRate of [0, 13, -1, 101, '13%']) {
     assert.throws(() => createEnvelope({ totalsConfig: { globalMarkupRate: 0, taxRate } }), /taxRate/)
+  }
+  for (const input of [
+    { lineItemEntryMode: 'simple' }, { templateId: 'legacy' }, { templateId: 'unknown' },
+    { majorItems: [{ title: 'Old item name', unitCost: 100 }] },
+    { majorItems: [{ name: 'Package', subItems: [{ name: 'Part', unitCost: 100 }] }] },
+  ]) {
+    const before = structuredClone(input)
+    assert.throws(() => createEnvelope(input), /lineItemEntryMode|templateId|title|subItems/)
+    assert.deepEqual(input, before)
+  }
+  const original = createQuotationRevisionInEnvelope(createEnvelope(), {}, now).envelope
+  for (const quotationPath of ['working', 'archived']) {
+    for (const mutate of [
+      quotation => { quotation.lineItemEntryMode = 'simple' },
+      quotation => { quotation.totalsConfig.taxRate = 13 },
+      quotation => { quotation.templateId = 'legacy' },
+      quotation => { quotation.majorItems[0].title = 'Old item name' },
+      quotation => { quotation.majorItems[0].subItems = [{ name: 'Part', unitCost: 100 }] },
+    ]) {
+      const invalid = structuredClone(original)
+      mutate(quotationPath === 'working' ? invalid.quotation : invalid.revisions[0].quotation)
+      const before = structuredClone(invalid)
+      assert.ok(validateQuotationEnvelope(invalid).errors.length)
+      assert.throws(() => buildQuotationEnvelope(invalid, now))
+      assert.deepEqual(invalid, before)
+    }
   }
 })
 
@@ -349,7 +375,7 @@ test('validates logo bytes, MIME type, and dimensions', () => {
   assert.ok(validateQuotationEnvelope(tooWide).errors.some(error => error.includes('dimensions')))
 })
 
-test('shares exact logo strings across v3 history without changing snapshot values or input', () => {
+test('shares exact logo strings across history without changing snapshot values or input', () => {
   const firstLogo = createPngDataUrl(64, 32)
   const secondLogo = createPngDataUrl(32, 32)
   const source = decodeQuotationEnvelope(createEnvelope({ branding: { logoDataUrl: firstLogo, accentColor: '#047857' } }))
@@ -361,15 +387,15 @@ test('shares exact logo strings across v3 history without changing snapshot valu
     return { id: `saved-${number}`, revisionNumber: number, createdAt: now.toISOString(), note: `  Snapshot ${number}\n原始版本  `, quotation }
   })
   const before = structuredClone(source)
-  const built = buildQuotationEnvelope(source, now).envelope
+  const built = buildQuotationEnvelope(encodeQuotationEnvelope(source), now).envelope
   assert.equal(built.schemaVersion, 4)
   assert.deepEqual(built.images, { 'image-1': firstLogo, 'image-2': secondLogo })
   assert.deepEqual(built.revisions.map(({ quotation }) => quotation.branding.logoImageId), ['image-1', 'image-2', null])
   assert.ok(!JSON.stringify(built).includes('logoDataUrl'))
   assert.deepEqual(decodeQuotationEnvelope(built).revisions, before.revisions)
   assert.deepEqual(source, before)
-  assert.deepEqual(encodeQuotationEnvelope(built), built)
-  assert.deepEqual(summarizeQuotationEnvelope(built), summarizeQuotationEnvelope(source))
+  assert.deepEqual(encodeQuotationEnvelope(decodeQuotationEnvelope(built)), built)
+  assert.deepEqual(summarizeQuotationEnvelope(built), summarizeQuotationEnvelope(encodeQuotationEnvelope(source)))
   const created = createQuotationRevisionInEnvelope(built, {}, now).envelope
   assert.deepEqual(decodeQuotationEnvelope(created).revisions.slice(0, 3), before.revisions)
   assert.deepEqual(decodeQuotationEnvelope(created).revisions[3].quotation, before.quotation)
@@ -416,13 +442,13 @@ test('rejects malformed shared images, missing references and inline/reference m
   const inherited = structuredClone(valid)
   inherited.images = Object.create({ 'image-1': valid.images['image-1'] })
   assert.throws(() => decodeQuotationEnvelope(inherited), /existing image/)
-  const mixedLegacy = decodeQuotationEnvelope(valid)
-  mixedLegacy.quotation.branding.logoImageId = 'image-1'
-  assert.throws(() => buildQuotationEnvelope(mixedLegacy, now), /mix inline/)
+  const mixedRuntime = decodeQuotationEnvelope(valid)
+  mixedRuntime.quotation.branding.logoImageId = 'image-1'
+  assert.throws(() => encodeQuotationEnvelope(mixedRuntime), /mix inline|logoImageId/)
   const unused = structuredClone(valid)
   unused.images['image-9'] = createPngDataUrl(1, 1)
   assert.deepEqual(validateQuotationEnvelope(unused).errors, [])
-  assert.deepEqual(encodeQuotationEnvelope(unused).images, valid.images)
+  assert.deepEqual(encodeQuotationEnvelope(decodeQuotationEnvelope(unused)).images, valid.images)
 })
 
 test('limits stored v4 bytes while allowing decoded repeated images to exceed the limit', () => {
@@ -529,19 +555,20 @@ test('receipt selection defaults are disclosed only for lines without explicit s
   assert.equal(partial.envelope.quotation.pendingGoodsReceiptDraft.lines[1].selected, true)
 })
 
-test('build defaults to schema 4 and upgrades legacy files without inventing archives', () => {
+test('build defaults to schema 4 and codecs keep saved and runtime envelopes distinct', () => {
   const original = createEnvelope()
   assert.equal(original.schemaVersion, 4)
   assert.deepEqual(original.revisions, [])
-  for (const schemaVersion of [1, 2]) {
-    const legacy = { ...decodeQuotationEnvelope(original), schemaVersion }
-    delete legacy.revisions
-    if (schemaVersion === 2) assert.deepEqual(validateQuotationEnvelope(legacy).errors, [])
-    const before = structuredClone(legacy)
-    const built = buildQuotationEnvelope(legacy, now).envelope
-    assert.deepEqual(built, original)
-    assert.deepEqual(legacy, before)
-  }
+  const runtime = decodeQuotationEnvelope(original)
+  const before = structuredClone(runtime)
+  assert.equal(Object.hasOwn(runtime, 'schemaVersion'), false)
+  assert.equal(Object.hasOwn(runtime, 'images'), false)
+  assert.equal(runtime.quotation.branding.logoDataUrl, '')
+  assert.deepEqual(encodeQuotationEnvelope(runtime), original)
+  assert.throws(() => encodeQuotationEnvelope(original), /schemaVersion|runtime|unversioned/i)
+  assert.throws(() => decodeQuotationEnvelope(runtime), /schemaVersion/)
+  assert.throws(() => buildQuotationEnvelope(runtime, now), /schemaVersion|wrapper|envelope/i)
+  assert.deepEqual(runtime, before)
 })
 
 test('create freezes the working quotation, advances once, and returns detached data', () => {
@@ -624,7 +651,7 @@ test('receipt edits preserve archives and restore keeps completed family receipt
   assert.deepEqual(current, before)
 })
 
-test('build fills a new working row in schema 3 without changing saved history or family identity', () => {
+test('build fills a new working row in schema 4 without changing saved history or family identity', () => {
   const input = createQuotationRevisionInEnvelope(createEnvelope(), {}, now).envelope
   input.quotation.majorItems.push({ name: 'New seal', quantity: 2, unitCost: 50 })
   const before = structuredClone(input)
@@ -659,24 +686,28 @@ test('build fills a new working row in schema 3 without changing saved history o
   }
 })
 
-test('all receipt mutations and revision creation upgrade valid legacy schema 2 to schema 4', () => {
-  const legacy = decodeQuotationEnvelope(createEnvelope())
-  legacy.schemaVersion = 2
-  delete legacy.revisions
-  const before = structuredClone(legacy)
-  for (const envelope of [
-    setPendingGoodsReceiptDraftInEnvelope(legacy, {}, now).envelope,
-    clearPendingGoodsReceiptDraftInEnvelope(legacy, now).envelope,
-    addGoodsReceiptToEnvelope(legacy, { filePath: 'C:\\receipt.pdf' }, now).envelope,
-    createQuotationRevisionInEnvelope(legacy, {}, now).envelope,
-  ]) {
-    assert.equal(envelope.schemaVersion, 4)
-    assert.ok(Array.isArray(envelope.revisions))
-    assert.equal(envelope.quotation.id, legacy.quotation.id)
-    assert.deepEqual(validateQuotationEnvelope(envelope).errors, [])
+test('all saved-document APIs reject old, missing and unknown schema versions without changing input', () => {
+  const valid = createQuotationRevisionInEnvelope(createEnvelope(), {}, now).envelope
+  for (const schemaVersion of [undefined, null, 1, 2, 3, 5, '4']) {
+    const invalid = { ...structuredClone(valid), schemaVersion }
+    if (schemaVersion === undefined) delete invalid.schemaVersion
+    const before = structuredClone(invalid)
+    assert.ok(validateQuotationEnvelope(invalid).errors.some(error => error.includes('schemaVersion')))
+    assert.ok(validateQuotationJsonContent(JSON.stringify(invalid)).errors.some(error => error.includes('schemaVersion')))
+    for (const operation of [
+      () => decodeQuotationEnvelope(invalid),
+      () => buildQuotationEnvelope(invalid, now),
+      () => summarizeQuotationEnvelope(invalid),
+      () => listQuotationRevisions(invalid),
+      () => setPendingGoodsReceiptDraftInEnvelope(invalid, {}, now),
+      () => clearPendingGoodsReceiptDraftInEnvelope(invalid, now),
+      () => addGoodsReceiptToEnvelope(invalid, { filePath: 'receipt.pdf' }, now),
+      () => createQuotationRevisionInEnvelope(invalid, {}, now),
+      () => restoreQuotationRevisionInEnvelope(invalid, valid.revisions[0].id, now),
+      () => deleteQuotationRevisionFromEnvelope(invalid, valid.revisions[0].id, now),
+    ]) assert.throws(operation, /schemaVersion|schema version/i)
+    assert.deepEqual(invalid, before)
   }
-  assert.deepEqual(listQuotationRevisions(legacy), [])
-  assert.deepEqual(legacy, before)
 })
 
 test('delete preserves gaps and active edits; deleting the last archive never resets numbering', () => {
@@ -740,9 +771,6 @@ test('rejects malformed revision metadata and archived content without normaliza
     assert.throws(() => clearPendingGoodsReceiptDraftInEnvelope(invalid, now), /invalid quotation/)
     assert.deepEqual(invalid, before)
   }
-  const nestedLegacy = { ...valid, schemaVersion: 2 }
-  assert.ok(validateQuotationEnvelope(nestedLegacy).errors.length)
-  assert.throws(() => buildQuotationEnvelope(nestedLegacy, now), /history requires/)
 })
 
 test('revision IDs, options, overflow, and timestamps fail without changing the input', () => {

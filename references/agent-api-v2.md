@@ -51,7 +51,7 @@ const result = await api.setOutputSettings({
 if (!result.ok) throw new Error(result.error.code)
 ```
 
-For whole sections, use `source: 'sections'` and existing header IDs in `sectionIds`. Set `informationalTotalsNote: ''` to hide the note; omit the field from imported JSON for the localized default. See [schema-v4.md](schema-v4.md) for text and inclusion/rounding rules. After importing into an older open editor, inspect `getQuotationSnapshot()` or `serializeQuotation()` to confirm the requested settings survived before exporting. API 2.2.0 and schema 3 existed before these features and are not sufficient proof of support.
+For whole sections, use `source: 'sections'` and existing header IDs in `sectionIds`. Set `informationalTotalsNote: ''` to hide the note; omit the field from imported JSON for the localized default. See [schema-v4.md](schema-v4.md) for text and inclusion/rounding rules. After importing into an older open editor, inspect `getQuotationSnapshot()` or `serializeQuotation()` to confirm the requested settings survived before exporting. Reported API/schema numbers alone are not sufficient proof of support.
 
 ## Quotation revisions
 
